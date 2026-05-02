@@ -466,12 +466,14 @@
       if (reachedAnswers) continue;
 
       // Check if this element starts a NEW question section.
-      // Match either "Questions X-Y" (range) OR "Questions X and Y" (pair).
+      // Match "Questions X-Y" range, "Questions X and Y" pair, or singular "Question X".
       const qGroupMatch = text.match(/Questions?\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})/i)
-        || text.match(/Questions?\s+(\d{1,2})\s+and\s+(\d{1,2})/i);
+        || text.match(/Questions?\s+(\d{1,2})\s+and\s+(\d{1,2})/i)
+        || text.match(/(?:^|\b)Question\s+(\d{1,2})(?!\s*[-–—\d])/i);
       if (qGroupMatch) {
         inQuestions = true;
-        lastQuestionEnd = Math.max(lastQuestionEnd, parseInt(qGroupMatch[2]));
+        const lastNum = qGroupMatch[2] ? parseInt(qGroupMatch[2]) : parseInt(qGroupMatch[1]);
+        lastQuestionEnd = Math.max(lastQuestionEnd, lastNum);
       } else if (inQuestions) {
         // Are we transitioning back to a passage?
         if (looksLikeNewPassageStart(el, text) || looksLikeProsePassage(el, text)) {
@@ -551,18 +553,25 @@
       });
     }
 
-    // Find group markers — both "Questions X-Y" (range) and "Questions X and Y" (pair)
+    // Find group markers — must appear at the START of the block, otherwise
+    // they're just instruction text mentioning a range (e.g. "spend 20 min
+    // on Questions 14-26"), not the actual group header. Three forms supported:
+    //   "Questions X-Y"   (range)
+    //   "Questions X and Y"  (pair)
+    //   "Question X"      (singular, single question)
     const groups = [];
     blocks.forEach((b, i) => {
-      const m = b.text.match(/Questions?\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})/i)
-        || b.text.match(/Questions?\s+(\d{1,2})\s+and\s+(\d{1,2})/i);
-      if (m) {
-        const start = parseInt(m[1]);
-        const end = parseInt(m[2]);
-        if (start >= 1 && end <= 40 && start <= end) {
-          if (!groups.some(g => g.start === start && g.end === end)) {
-            groups.push({ start, end, blockIdx: i, title: m[0] });
-          }
+      let start, end, title;
+      const rangeM = b.text.match(/^\s*Questions?\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})/i);
+      const pairM = !rangeM && b.text.match(/^\s*Questions?\s+(\d{1,2})\s+and\s+(\d{1,2})/i);
+      const singleM = !rangeM && !pairM && b.text.match(/^\s*Question\s+(\d{1,2})(?!\s*[-–—\d])/i);
+      if (rangeM)      { start = parseInt(rangeM[1]); end = parseInt(rangeM[2]); title = rangeM[0]; }
+      else if (pairM)  { start = parseInt(pairM[1]);  end = parseInt(pairM[2]);  title = pairM[0]; }
+      else if (singleM){ start = end = parseInt(singleM[1]);                      title = singleM[0]; }
+      else return;
+      if (start >= 1 && end <= 40 && start <= end) {
+        if (!groups.some(g => g.start === start && g.end === end)) {
+          groups.push({ start, end, blockIdx: i, title });
         }
       }
     });
@@ -645,10 +654,13 @@
       const instructionText = instructionBlocks.map(b => b.text).join(' ');
       const instructionHTML = instructionBlocks.map(b => `<p>${escapeHTML(b.text)}</p>`).join('');
 
-      // Question blocks from firstQIdx onward — accumulate text per question
-      // number AND collect any matching list (A. ... B. ... entries that follow
-      // the last numbered question, used by "Match with list of X" questions).
-      const qBlocks = grpBlocks.slice(firstQIdx);
+      // Walk ALL grpBlocks (after the title) to extract:
+      //   - numbered questions   → qTexts[N]
+      //   - "List of X" header   → enters list-collection mode
+      //   - letter entries A./B. → matchingList (for List of People/etc.)
+      //   - Roman numeral entries i/ii/iii… → matchingList (for List of Headings)
+      //   - "Example…" lines     → skipped (don't pollute question text)
+      //   - other blocks         → appended to current question text
       const qTexts = {};
       const matchingList = []; // [{letter, text}]
       let curQ = null;
@@ -661,20 +673,31 @@
         }
       };
 
-      qBlocks.forEach(b => {
-        // Numbered question start?
-        const m = b.text.match(/^\s*[\(\[]?(\d{1,2})[\.\)\]]?\s+(.*)$/);
-        if (m) {
-          const n = parseInt(m[1]);
+      // Valid lowercase Roman numerals 1–30 (and a few uppercase variants)
+      const ROMAN_RE = /^(i{1,3}|iv|v|vi{1,3}|ix|x|xi{1,3}|xiv|xv|xvi{1,3}|xix|xx|xxi{1,3}|xxiv|xxv|xxvi{1,3}|xxix|xxx)$/i;
+
+      grpBlocks.slice(1).forEach(b => {
+        // Skip worked-example hints between numbered questions in heading-match groups:
+        //   "Example Answer", "Example:", "Example)", "Example  Paragraph A  vii"
+        //   "Paragraph A  vii"  /  "Section D  ix"  (no explicit Example prefix)
+        if (/^\s*Example\b/i.test(b.text)) return;
+        if (/^\s*(Paragraph|Section|Passage)\s+[A-J]\s+[ivx]+\s*$/i.test(b.text)) return;
+        // Skip site footer/watermark text like "Cambridge IELTS Test 1 to 17"
+        if (/^\s*Cambridge\s+IELTS\s+Tests?\b/i.test(b.text)) return;
+
+        // Numbered question start
+        const numM = b.text.match(/^\s*[\(\[]?(\d{1,2})[\.\)\]]?\s+(.*)$/);
+        if (numM) {
+          const n = parseInt(numM[1]);
           if (n >= grp.start && n <= grp.end) {
             flush();
-            curQ = n;
-            curParts = m[2] ? [m[2]] : [];
+            curQ = n; curParts = numM[2] ? [numM[2]] : [];
             collectingList = false;
             return;
           }
         }
-        // "List of X" header — switch to list collection
+
+        // "List of X" header — switch to list-collection mode
         const headerM = b.text.match(/^\s*List\s+of\s+\w+/i);
         if (headerM) {
           flush();
@@ -682,20 +705,30 @@
           collectingList = true;
           const rest = b.text.replace(/^\s*List\s+of\s+\w+\s*[:.\-]?\s*/i, '');
           if (rest) {
-            const re = /([A-H])[\.\)]\s+(.+?)(?=\s+[A-H][\.\)]\s|$)/g;
+            // Letter form
+            const reA = /([A-H])[\.\)]\s+(.+?)(?=\s+[A-H][\.\)]\s|$)/g;
             let lm;
-            while ((lm = re.exec(rest)) !== null) {
+            while ((lm = reA.exec(rest)) !== null) {
               matchingList.push({ letter: lm[1], text: lm[2].trim() });
+            }
+            // Roman numeral form (only if no letter entries found inline)
+            if (matchingList.length === 0) {
+              const reR = /\b([ivx]+)\s+(.+?)(?=\s+[ivx]+\s+\S|$)/gi;
+              let rm;
+              while ((rm = reR.exec(rest)) !== null) {
+                if (ROMAN_RE.test(rm[1])) {
+                  matchingList.push({ letter: rm[1].toLowerCase(), text: rm[2].trim() });
+                }
+              }
             }
           }
           return;
         }
-        // Single letter list entry "A. Dan Macon"
+
+        // Single letter entry "A. text" or "A) text"
         const letM = b.text.match(/^\s*([A-H])[\.\)]\s+(.+)$/);
         if (letM) {
-          // Either we're already collecting, OR we've finished the last numbered
-          // question and this is the start of a list (no explicit "List of..." header)
-          if (collectingList || curQ === grp.end) {
+          if (collectingList || curQ === null || curQ === grp.end) {
             flush();
             curQ = null;
             collectingList = true;
@@ -703,6 +736,20 @@
             return;
           }
         }
+
+        // Roman numeral entry "i text" / "ii text" / "iv text" / "viii text"
+        const romM = b.text.match(/^\s*([ivx]+)\s+(\S.+)$/i);
+        if (romM && ROMAN_RE.test(romM[1])) {
+          if (collectingList || curQ === null || curQ === grp.end) {
+            flush();
+            curQ = null;
+            collectingList = true;
+            matchingList.push({ letter: romM[1].toLowerCase(), text: romM[2].trim() });
+            return;
+          }
+        }
+
+        // Continuation of current numbered question
         if (curQ !== null) curParts.push(b.text);
       });
       flush();
