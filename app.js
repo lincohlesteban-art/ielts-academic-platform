@@ -352,19 +352,27 @@
                     doc.querySelector('article') || doc.querySelector('main') || doc.body;
     if (!contentEl) return { passage: '<p>Could not parse.</p>', questions: '' };
 
-    // Extract answers FIRST from the full text before removing the section
+    // Extract answers FIRST from the full text before removing the section.
+    // Anchor on the "Show Answers" / "Answer Key" / "Answers:" marker that
+    // practicepteonline.com puts at the end of every test, then read the
+    // numbered list that follows. Falls back to "1. True/False/..." anchor
+    // for older tests that don't have the marker.
     let answersData = {};
     const fullText = contentEl.textContent || '';
-    // Find answer lines: "1. False", "2. True", "14. C", "24. Oak", etc.
-    const answerStart = fullText.search(/\n\s*1\.\s*(?:True|False|Not\s*Given|Yes|No)\b/i);
+    let answerStart = fullText.search(/\b(?:Show\s+)?Answers?(?:\s+Key)?\s*:?\s*(?=1\s*[\.\)])/i);
+    if (answerStart < 0) {
+      answerStart = fullText.search(/\n\s*1\.\s*(?:True|False|Not\s*Given|Yes|No)\b/i);
+    }
     if (answerStart > 0) {
-      const answerSection = fullText.substring(answerStart);
-      const answerRegex = /^\s*(\d{1,2})\.\s*(.+?)\s*$/gm;
+      let answerSection = fullText.substring(answerStart)
+        .replace(/^\s*(?:Show\s+)?Answers?(?:\s+Key)?\s*:?\s*/i, '');
+      // The answer list may be either line-separated or all glued together
+      // (e.g. "1. tomatoes2. urban centres3. energy..."). Use a tolerant regex.
+      const answerRegex = /\b(\d{1,2})\s*[\.\)]\s*([^\d][^\d\n]*?)(?=\s*\d{1,2}\s*[\.\)]|$)/g;
       let am;
       while ((am = answerRegex.exec(answerSection)) !== null) {
         const qNum = parseInt(am[1]);
         const val = am[2].trim();
-        // Stop if we hit explanations text (long answers are explanations, not answers)
         if (val.length > 40) break;
         if (qNum >= 1 && qNum <= 40) answersData[qNum] = val;
       }
@@ -397,7 +405,7 @@
       if (!t) return false;
       // Skip blocks that are obviously question-related
       if (/Questions?\s+\d/i.test(t)) return false;
-      if (/^\s*[\(\[]?\d{1,2}[\.\)\]]\s/.test(t)) return false;
+      if (/^\s*[\(\[]?\d{1,2}[\.\)\]]?\s+\S/.test(t)) return false;
       if (/^(Choose|Match|Complete|Write|Look at|Do the following|Which|Using)\b/i.test(t)) return false;
 
       // Explicit passage marker
@@ -421,10 +429,13 @@
       if (!t || t.length < 200) return false;
       if (/Questions?\s+\d{1,2}\s*[-–—]\s*\d{1,2}/i.test(t)) return false;
       if (/Questions?\s+\d{1,2}\s+and\s+\d{1,2}/i.test(t)) return false;
-      if (/^\s*[\(\[]?\d{1,2}[\.\)\]]\s/.test(t)) return false; // numbered question
+      if (/^\s*[\(\[]?\d{1,2}[\.\)\]]?\s+\S/.test(t)) return false; // numbered question
       if (/\bTRUE\b.{0,80}\bFALSE\b/i.test(t)) return false;
       if (/\bYES\b.{0,80}\bNO\b.{0,80}\bNOT\s*GIVEN\b/i.test(t)) return false;
-      if (/^(Choose|Match|Complete|Write|Look at|Do the following|Which|Using)/i.test(t)) return false;
+      // Instruction prefix
+      if (/^(Use\s+the|Read\s+the|Choose|Match|Complete|Write|Look\s+at|Do\s+the\s+following|Which\s+(paragraph|section|of)|Using|In\s+boxes|NB\b)/i.test(t)) return false;
+      // Anywhere in the text — strong instruction signals
+      if (/\b(your\s+answer\s+sheet|in\s+boxes\s+\d|Reading\s+Passage\s+\d|listed\s+[A-H]\s*[-–—]\s*[A-H]|listed\s+\d+\s*[-–—]\s*\d+)\b/i.test(t)) return false;
       const sentenceCount = (t.match(/[\.!?]\s+[A-Z]/g) || []).length;
       return sentenceCount >= 2;
     }
@@ -433,12 +444,23 @@
       const text = el.textContent || '';
 
       // Detect answer/explanation section — stop processing
-      if (/^Explanations?:/i.test(text.trim()) ||
-          /^Questions?\s+\d+[\s-]+\d+\s+are\s+of/i.test(text.trim())) {
+      const tt = text.trim();
+      if (/^Explanations?:/i.test(tt) ||
+          /^Questions?\s+\d+[\s-]+\d+\s+are\s+of/i.test(tt)) {
         reachedAnswers = true;
       }
-      // Also detect answer block: starts with "1. False" or "1. True" etc.
-      if (/^\s*1\.\s*(True|False|Not\s*Given|Yes|No)\b/im.test(text) && text.trim().length < 20) {
+      // "Show Answers" / "Answer Key" / "Answers:" marker (often a standalone block)
+      if (/^(?:Show\s+)?Answers?(?:\s+Key)?:?\s*$/i.test(tt)) {
+        reachedAnswers = true;
+      }
+      // Concatenated answer block ("1. tomatoes2. urban centres3. energy..."
+      // or "1. False\n2. True\n...") — three sequential numbered short items
+      // at the start of the block is unmistakable.
+      if (/^\s*1\s*[\.\)]\s*\S[^]{0,40}?\s*2\s*[\.\)]\s*\S[^]{0,40}?\s*3\s*[\.\)]\s*\S/.test(tt)) {
+        reachedAnswers = true;
+      }
+      // Single-line "1. True/False/..." answer block
+      if (/^\s*1\.\s*(True|False|Not\s*Given|Yes|No)\b/im.test(text) && tt.length < 20) {
         reachedAnswers = true;
       }
       if (reachedAnswers) continue;
@@ -556,10 +578,14 @@
       const grpBlocks = blocks.slice(startIdx, endIdx);
 
       // Find first block that is a numbered question matching grp.start.
-      // A question block starts with: "1." / "1)" / "(1)" / "[1]"
+      // A question block starts with: "1.", "1)", "[1]", or "1 ".
+      // We deliberately do NOT match "(1)" — parenthesized numbers are
+      // overwhelmingly used for embedded blanks (in notes/tables/summaries),
+      // not as question numbers, and falsely matching them swallows
+      // surrounding cell content into the question text.
       const numberedAt = (b, n) => {
-        const re = new RegExp('^\\s*[\\(\\[]?' + n + '[\\.\\)\\]]?\\s+');
-        return re.test(b.text);
+        if (new RegExp('^\\s*\\(' + n + '\\)').test(b.text)) return false;
+        return new RegExp('^\\s*\\[?' + n + '[\\.\\)\\]]?\\s+').test(b.text);
       };
 
       let firstQIdx = grpBlocks.findIndex((b, i) => i > 0 && numberedAt(b, grp.start));
@@ -574,8 +600,14 @@
       let isEmbeddedBlanks = false;
       if (firstQIdx === grpBlocks.length) {
         const blankMarkers = [];
+        // Match the blank that follows the number — regular dots (.....),
+        // Unicode horizontal ellipsis (…), underscores (_____), or any
+        // mix of these gap-filler characters.
         for (let n = grp.start; n <= grp.end; n++) {
-          const re = new RegExp('\\(' + n + '\\)\\s*\\.{2,}|\\(' + n + '\\)\\s*_{2,}|\\b' + n + '\\s*\\.{4,}');
+          const re = new RegExp(
+            '\\(' + n + '\\)\\s*[\\.\\u2026_]+|' +
+            '\\b' + n + '\\s*[\\.\\u2026]{2,}'
+          );
           if (re.test(groupFullText)) blankMarkers.push(n);
         }
         if (blankMarkers.length >= 2) isEmbeddedBlanks = true;
@@ -676,9 +708,11 @@
       flush();
 
       // ---- Split inline-mashed numbered questions ----
-      // Source HTML sometimes lists "27 text 28.text 29.text" all in one paragraph
-      // without <br>, so the first numbered question captured the rest.
-      // Split on the next expected number (preceded by space, may be glued to next char).
+      // Source HTML sometimes lists "27 text 28.text 29.text" or even
+      // "income15. examples" all in one paragraph without <br>. Split on
+      // the next expected number using a permissive boundary: previous char
+      // must NOT be a digit (so we don't break "1234"), and the number must
+      // be followed by . or ) and then a letter (with optional whitespace).
       for (let q = grp.start; q <= grp.end; q++) {
         if (!qTexts[q]) continue;
         let txt = qTexts[q];
@@ -686,13 +720,16 @@
         while (curN < grp.end) {
           const nextN = curN + 1;
           if (qTexts[nextN]) break;
-          const re = new RegExp('(^|\\s)' + nextN + '[\\.\\)]?\\s*(?=[A-Za-z])');
+          const re = new RegExp('(?:^|[^0-9])(' + nextN + ')[\\.\\)]\\s*(?=[A-Za-z])');
           const mm = txt.match(re);
           if (mm) {
-            const splitAt = mm.index + (mm[1] ? mm[1].length : 0);
-            const before = txt.substring(0, splitAt).trim();
-            const after = txt.substring(splitAt)
-              .replace(new RegExp('^' + nextN + '[\\.\\)]?\\s*'), '').trim();
+            // mm.index points at start of match; offset to start of number
+            const numStart = mm.index + (mm[0].length - mm[1].length - 2); // back up over ". " or ")"
+            // Simpler: find the actual number position
+            const idxOfNum = txt.indexOf(mm[1], mm.index);
+            const before = txt.substring(0, idxOfNum).trim();
+            const after = txt.substring(idxOfNum)
+              .replace(new RegExp('^' + nextN + '[\\.\\)]\\s*'), '').trim();
             qTexts[curN] = before;
             qTexts[nextN] = after;
             txt = after;
@@ -704,12 +741,13 @@
       }
 
       // ---- Strip trailing matching-list text from the last question ----
-      // If matchingList wasn't picked up above but the last question's text
-      // ends with "List of X" or contiguous "A. ... B. ..." entries, peel them off.
+      // Only strip if followed by 2+ letter entries — avoids killing the prose
+      // phrase "list of personal possessions" that's part of the question text.
       if (matchingList.length === 0 && qTexts[grp.end]) {
         let lastTxt = qTexts[grp.end];
-        const listHeaderM = lastTxt.match(/\bList\s+of\s+\w+\b/i);
         let trailStart = -1;
+        // Pattern A: "List of X" header followed by "A. word B. word ..."
+        const listHeaderM = lastTxt.match(/\bList\s+of\s+\w+\s+([A-H])[\.\)]\s/i);
         if (listHeaderM) {
           trailStart = listHeaderM.index;
         } else {
@@ -785,17 +823,57 @@
         // Convert dotted blanks to underscore line
         qText = qText.replace(/(?:\.{3,}|_{3,})/g, '_______').trim();
 
-        // Multiple choice: extract A./B./C./D. options inline
+        // Multiple choice: extract A./B./C./D. options inline.
+        // Handles two forms found in source HTML:
+        //   - With period:    "stem... A. opt1 B. opt2 C. opt3 D. opt4"
+        //   - Bare letter:    "stem... A opt1 B opt2 C opt3 D opt4"
         let mcOptions = [];
         if (isMC) {
+          // 1) Try period/paren form first
           const optMatch = qText.match(/^(.*?)\s*(?=\bA[\.\)]\s)/s);
-          if (optMatch) {
+          if (optMatch && optMatch[1].length < qText.length) {
             const stem = optMatch[1].trim();
             const optPart = qText.substring(stem.length);
-            const parts = optPart.split(/\b([A-D])[\.\)]\s*/);
+            const parts = optPart.split(/\b([A-E])[\.\)]\s*/);
             qText = stem;
             for (let i = 1; i < parts.length; i += 2) {
               mcOptions.push({ letter: parts[i], text: (parts[i + 1] || '').trim() });
+            }
+          }
+          // 2) Bare-letter fallback: find positions where A, B, C (and D, E)
+          //    appear as standalone single letters in sequence
+          if (mcOptions.length === 0) {
+            const positionsOf = (letter) => {
+              const re = new RegExp('(^|\\s)' + letter + '(\\s+\\S)', 'g');
+              const out = []; let m;
+              while ((m = re.exec(qText)) !== null) {
+                out.push(m.index + (m[1] ? m[1].length : 0));
+              }
+              return out;
+            };
+            const aP = positionsOf('A'), bP = positionsOf('B'),
+                  cP = positionsOf('C'), dP = positionsOf('D'), eP = positionsOf('E');
+            for (let i = aP.length - 1; i >= 0; i--) {
+              const a = aP[i];
+              const b = bP.find(p => p > a); if (!b) continue;
+              const c = cP.find(p => p > b); if (!c) continue;
+              const d = dP.find(p => p > c);
+              const e = eP.find(p => p > (d || c));
+              const seq = [{ letter: 'A', pos: a }, { letter: 'B', pos: b }, { letter: 'C', pos: c }];
+              if (d) seq.push({ letter: 'D', pos: d });
+              if (e) seq.push({ letter: 'E', pos: e });
+              const stem = qText.slice(0, a).trim();
+              const opts = [];
+              for (let k = 0; k < seq.length; k++) {
+                const start = seq[k].pos + 2; // skip "A " (letter + space)
+                const end = (k + 1 < seq.length) ? seq[k+1].pos : qText.length;
+                opts.push({ letter: seq[k].letter, text: qText.substring(start, end).trim() });
+              }
+              if (opts.length >= 3) {
+                qText = stem;
+                mcOptions = opts;
+                break;
+              }
             }
           }
         }
