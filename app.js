@@ -382,8 +382,9 @@
     const tmpDoc = new DOMParser().parseFromString('<div>' + rawHTML + '</div>', 'text/html');
     const root = tmpDoc.body.firstChild;
 
-    let passageParts = [];
-    let questionParts = [];
+    let passageParts = [];      // passage paragraphs only
+    let questionParts = [];     // raw question HTML (used to build interactive form)
+    let allContentParts = [];   // passage + raw questions (in original document order)
     let inQuestions = false;
     let reachedAnswers = false;
     let lastQuestionEnd = 0; // highest question number we've seen so far
@@ -458,12 +459,15 @@
 
       if (inQuestions) {
         questionParts.push(el.outerHTML);
+        // Wrap question blocks on the passage side so they're visually distinct
+        allContentParts.push(`<div class="passage-question-block">${el.outerHTML}</div>`);
       } else {
         passageParts.push(el.outerHTML);
+        allContentParts.push(el.outerHTML);
       }
     }
 
-    let passageHTML = passageParts.join('');
+    let passageHTML = allContentParts.join('');
     const questionsRawHTML = questionParts.join('');
 
     // Build interactive questions

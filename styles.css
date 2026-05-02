@@ -795,6 +795,23 @@ body {
   min-width: 18px;
 }
 
+/* Original question prompts shown inline within the passage panel
+   (so the user can verify questions against passage text) */
+.passage-question-block {
+  background: #fff8e7;
+  border-left: 3px solid #f3b73c;
+  border-radius: 4px;
+  padding: 8px 14px;
+  margin: 12px 0;
+  font-size: 0.92rem;
+}
+.passage-question-block p {
+  margin: 4px 0;
+}
+.passage-question-block strong {
+  color: #8a5a00;
+}
+
 .question-item {
   display: flex;
   align-items: flex-start;
