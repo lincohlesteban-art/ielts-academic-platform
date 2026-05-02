@@ -419,11 +419,11 @@
       const t = text.trim();
       if (!t || t.length < 200) return false;
       if (/Questions?\s+\d{1,2}\s*[-–—]\s*\d{1,2}/i.test(t)) return false;
+      if (/Questions?\s+\d{1,2}\s+and\s+\d{1,2}/i.test(t)) return false;
       if (/^\s*[\(\[]?\d{1,2}[\.\)\]]\s/.test(t)) return false; // numbered question
       if (/\bTRUE\b.{0,80}\bFALSE\b/i.test(t)) return false;
       if (/\bYES\b.{0,80}\bNO\b.{0,80}\bNOT\s*GIVEN\b/i.test(t)) return false;
       if (/^(Choose|Match|Complete|Write|Look at|Do the following|Which|Using)/i.test(t)) return false;
-      // Has at least 3 sentences ending in period (looks like prose)
       const sentenceCount = (t.match(/[\.!?]\s+[A-Z]/g) || []).length;
       return sentenceCount >= 2;
     }
@@ -442,8 +442,10 @@
       }
       if (reachedAnswers) continue;
 
-      // Check if this element starts a NEW question section
-      const qGroupMatch = text.match(/Questions?\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})/i);
+      // Check if this element starts a NEW question section.
+      // Match either "Questions X-Y" (range) OR "Questions X and Y" (pair).
+      const qGroupMatch = text.match(/Questions?\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})/i)
+        || text.match(/Questions?\s+(\d{1,2})\s+and\s+(\d{1,2})/i);
       if (qGroupMatch) {
         inQuestions = true;
         lastQuestionEnd = Math.max(lastQuestionEnd, parseInt(qGroupMatch[2]));
@@ -523,15 +525,15 @@
       });
     }
 
-    // Find "Questions X-Y" group markers
+    // Find group markers — both "Questions X-Y" (range) and "Questions X and Y" (pair)
     const groups = [];
     blocks.forEach((b, i) => {
-      const m = b.text.match(/Questions?\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})/i);
+      const m = b.text.match(/Questions?\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})/i)
+        || b.text.match(/Questions?\s+(\d{1,2})\s+and\s+(\d{1,2})/i);
       if (m) {
         const start = parseInt(m[1]);
         const end = parseInt(m[2]);
         if (start >= 1 && end <= 40 && start <= end) {
-          // Avoid duplicates
           if (!groups.some(g => g.start === start && g.end === end)) {
             groups.push({ start, end, blockIdx: i, title: m[0] });
           }
