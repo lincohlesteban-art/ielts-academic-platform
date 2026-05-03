@@ -824,7 +824,7 @@
       // Use generous lookups so detection succeeds even when option lists wrap to new paragraphs.
       const detectionText = [
         instructionText,
-        qBlocks.slice(0, 4).map(b => b.text).join(' ')
+        grpBlocks.slice(firstQIdx, firstQIdx + 4).map(b => b.text).join(' ')
       ].join(' ');
       const isTFNG = /\bTRUE\b[\s\S]{0,300}\bFALSE\b[\s\S]{0,300}\bNOT\s*GIVEN\b/i.test(detectionText)
         || /statements?\s+agree\s+with\s+the\s+(information|claims|views)/i.test(detectionText) && /\bTRUE\b/i.test(detectionText);
