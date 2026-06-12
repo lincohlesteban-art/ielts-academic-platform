@@ -436,6 +436,7 @@
     let chooseEndLetter = null; // "Choose TWO letters, A-E" → 'E'
     let lettersDone = false;    // that final option letter has appeared
     let groupImgSeen = false;   // group contains an image (diagram labelling)
+    let singleQGroup = false;   // header was singular "Question N" (no range)
 
     // Some tests wrap the ENTIRE test (all passages + questions) in one giant
     // <div>, so root.children would be a single block and nothing could be
@@ -605,6 +606,7 @@
         chooseEndLetter = null;
         lettersDone = false;
         groupImgSeen = false;
+        singleQGroup = !qGroupMatch[2];
       } else if (inQuestions) {
         // Track evidence that the current group's numbered questions/blanks
         // have actually appeared ("34.", "(34)", "34 ……"). Until the group is
@@ -651,9 +653,32 @@
           const mcDecl = tt.match(/Choose\s+the\s+correct\s+letters?\b.{0,40}?\s+or\s+([A-K])\b/i);
           if (mcDecl) chooseEndLetter = mcDecl[1].toUpperCase();
         }
+        // Single-question title / matching-from-list groups declare a letter
+        // RANGE — "Write the appropriate letter A-E in box 28", "Choose the
+        // appropriate letter A-D". These have no numbered line (the number is
+        // only in the "Question 28" header), so maxSeenQ never reaches groupEnd
+        // and the next passage would leak in. Treat the group as complete once
+        // the last listed option letter appears.
+        if (!chooseEndLetter) {
+          const letterRange = tt.match(/\bletters?\s+\(?([A-H])\s*(?:[-–—~]|to\s)\s*([B-K])\b/i);
+          if (letterRange && letterRange[2].charCodeAt(0) > letterRange[1].charCodeAt(0) &&
+              letterRange[2].charCodeAt(0) - letterRange[1].charCodeAt(0) <= 10) {
+            chooseEndLetter = letterRange[2].toUpperCase();
+          }
+        }
         if (chooseEndLetter && !lettersDone) {
           const endRe = new RegExp('(?:^|[\\s,;:.])' + chooseEndLetter + '\\s+\\S');
           if (endRe.test(tt)) lettersDone = true;
+        }
+        // Single-question title/MC groups (e.g. "Question 26: From the list
+        // below choose the most suitable title…") have no numbered line and may
+        // NOT declare a letter range. Their options stream as short bare lines
+        // "A …", "B …", "C …". Seeing the SECOND option (B or later) confirms the
+        // stem + options are present, so the group is complete and a following
+        // passage title can flip back out instead of leaking in.
+        if (singleQGroup && !lettersDone) {
+          const optM = tt.match(/^\s*([A-K])\s+\S/);
+          if (optM && optM[1] >= 'B' && tt.length < 150) lettersDone = true;
         }
 
         // Diagram/flow-chart groups number their blanks inside an image —
@@ -1258,6 +1283,57 @@
         }
       }
 
+      // ---- "Choose the most suitable title/heading from the list" ----
+      // A single-question group whose options A-E live in the instruction with
+      // no declared letter range. Two source layouts: (A) each option is its own
+      // block "A The global decline…", "B Concern…"; (B) all glued into one block
+      // "…Reading Passage 2.A The global…levelsB Concern…". Pull them into a
+      // dropdown either way.
+      if (matchingList.length === 0 && (noNumbered || grp.start === grp.end)) {
+        const titleListRe = /from\s+the\s+list|most\s+suitable\s+(?:title|heading)|suitable\s+(?:title|heading)\s+for/i;
+        const hasTitleWording = instructionBlocks.some(b => titleListRe.test(b.text));
+        if (hasTitleWording) {
+          // Layout A: consecutive bare-letter option blocks
+          const opts = [];
+          let expect = 'A'.charCodeAt(0);
+          const consumed = [];
+          instructionBlocks.forEach(b => {
+            const m = b.text.match(/^\s*([A-K])\s+(\S.*)$/);
+            if (m && m[1].charCodeAt(0) === expect && m[2].trim().length < 120) {
+              opts.push({ letter: m[1], text: m[2].trim() });
+              consumed.push(b);
+              expect++;
+            }
+          });
+          if (opts.length >= 2) {
+            matchingList.push(...opts);
+            consumed.forEach(b => { b._instrOverride = ''; });  // hide from instruction
+            isMatching = true;
+          } else {
+            // Layout B: all options glued into one block
+            for (const b of instructionBlocks) {
+              if (!titleListRe.test(b.text)) continue;
+              let best = null;
+              for (let endC = 'H'.charCodeAt(0); endC >= 'C'.charCodeAt(0); endC--) {
+                const letters = [];
+                for (let c = 'A'.charCodeAt(0); c <= endC; c++) letters.push(String.fromCharCode(c));
+                const split = splitGluedLetterSeq(b.text, letters);
+                if (split && split.before &&
+                    split.entries.every(e => e.text.length > 1 && e.text.length < 120)) {
+                  best = split; break;
+                }
+              }
+              if (best) {
+                b._instrOverride = best.before;
+                matchingList.push(...best.entries);
+                isMatching = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+
       // ---- Split inline-mashed numbered questions ----
       // Source HTML sometimes lists "27 text 28.text 29.text" or even
       // "income15. examples" all in one paragraph without <br>. Split on
@@ -1313,6 +1389,46 @@
                                        // any numbered question → it's matching-
                                        // from-list; restore dropdown. (noNumbered
                                        // MC keeps its options in the instruction.)
+        }
+      }
+
+      // ---- Two-letter-code classification legend ----
+      // "Match each exhibit with the collection type … Write the appropriate
+      // letters in boxes 7-12" uses TWO-letter codes (AT, EC, FA, SE, TS) with
+      // Title-case labels, glued onto the last question's text. The single-letter
+      // extractor can't see them, so detect the run of "XX Title Case" pairs,
+      // pull them into the option list, and strip the legend off the question.
+      // Requires >=3 DISTINCT two-uppercase codes each followed by a Title-case
+      // label — acronym runs ("US EU NATO") and prose never satisfy this.
+      if (!isMC && !isMultiSelect && matchingList.length === 0) {
+        const codePairRe = /\b([A-Z]{2})\s+([A-Z][a-z]+(?:\s+(?:of\s+|the\s+|and\s+)?[A-Z][a-z]+)*)/g;
+        let legendQ = -1, legendStart = -1, codes = null;
+        for (let q = grp.end; q >= grp.start; q--) {
+          const txt = qTexts[q];
+          if (!txt) continue;
+          codePairRe.lastIndex = 0;
+          const pairs = [];
+          let m;
+          while ((m = codePairRe.exec(txt)) !== null) {
+            pairs.push({ letter: m[1], text: m[2].trim(), index: m.index });
+          }
+          const distinct = new Set(pairs.map(p => p.letter));
+          if (pairs.length >= 3 && distinct.size >= 3) {
+            legendQ = q; legendStart = pairs[0].index; codes = pairs;
+            break;
+          }
+        }
+        if (codes) {
+          const seen = new Set();
+          codes.forEach(c => {
+            if (seen.has(c.letter)) return;
+            seen.add(c.letter);
+            matchingList.push({ letter: c.letter, text: c.text });
+          });
+          qTexts[legendQ] = qTexts[legendQ].substring(0, legendStart)
+            .replace(/\s*(Collection\s+)?Types?\s*$/i, '')
+            .trim();
+          isMatching = true;
         }
       }
 
@@ -1492,7 +1608,9 @@
         // options and diagram images are self-explanatory.
         const hasOwnOptions = (isMultiSelect && matchingList.length > 0)
           || (isMC && mcOptions.length > 0)
-          || (isMC && noNumbered && matchingList.length > 0);
+          || (isMC && noNumbered && matchingList.length > 0)
+          // single title/heading-from-list question: the options box is the context
+          || (isMatching && matchingList.length > 0 && grp.start === grp.end);
         if (qText) {
           html += `<div class="q-statement">${escapeHTML(qText)}</div>`;
         } else if (!hasOwnOptions && !groupHasImgs) {
@@ -1589,6 +1707,31 @@
       if (!m) return null;
       const letterPos = m.index + m[0].indexOf(L);
       positions.push({ letterPos, textStart: m.index + m[0].length });
+      searchFrom = m.index + m[0].length;
+    }
+    const entries = positions.map((p, i) => ({
+      letter: letters[i],
+      text: text.substring(p.textStart, i + 1 < positions.length ? positions[i + 1].letterPos : text.length).trim()
+    }));
+    if (entries.some(e => !e.text)) return null;
+    return { before: text.substring(0, positions[0].letterPos).trim(), entries };
+  }
+
+  // Like splitBareLetterSeq, but for option letters GLUED to the previous word
+  // with no separator: "…Passage 2.A The global…levelsB Concern…developmentsC…".
+  // The letter need not be preceded by a boundary; it just has to be followed by
+  // whitespace then a Title-case/number start. Used for "choose the most
+  // suitable title/heading from the list" single questions.
+  function splitGluedLetterSeq(text, letters) {
+    if (!text || !letters || letters.length < 2) return null;
+    const positions = [];
+    let searchFrom = 0;
+    for (const L of letters) {
+      const re = new RegExp(L + '\\s+(?=[A-Z0-9])', 'g');
+      re.lastIndex = searchFrom;
+      const m = re.exec(text);
+      if (!m) return null;
+      positions.push({ letterPos: m.index, textStart: m.index + m[0].length });
       searchFrom = m.index + m[0].length;
     }
     const entries = positions.map((p, i) => ({
