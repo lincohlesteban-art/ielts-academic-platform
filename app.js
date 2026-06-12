@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
    IELTS Academic Practice Platform — Application Logic
    ============================================================ */
 
@@ -30,6 +30,7 @@
   const testSplit = document.getElementById('test-split');
   const passageContent = document.getElementById('passage-content');
   const questionsContent = document.getElementById('questions-content');
+  let ensureDrawCanvases = null; // set up by the drawing engine; re-attaches pane canvases
   const contextMenu = document.getElementById('context-menu');
   const timerDisplay = document.getElementById('timer-display');
   const timerStartBtn = document.getElementById('timer-start');
@@ -297,6 +298,8 @@
           testContainer.classList.add('split-active');
           bindSplitDivider();
           bindAnswerChecking();
+          // New content height — re-attach/resize drawing canvases if active.
+          if (ensureDrawCanvases) setTimeout(ensureDrawCanvases, 50);
         } catch (err) {
           console.error("Parse error:", err);
           loadingSpinner.innerHTML = `
@@ -306,6 +309,15 @@
             </div>
           `;
         }
+      } else if (type === 'writing') {
+        const content = parseWritingContent(html, testInfo);
+        testContent.innerHTML = content || '<p style="padding:20px">Could not parse writing test.</p>';
+        testContent.style.display = 'block';
+        loadingSpinner.style.display = 'none';
+        testBody.style.display = 'block';
+        testSplit.style.display = 'none';
+        testContainer.classList.remove('split-active');
+        bindWritingTest();
       } else {
         const content = parseTestContent(html, type, testInfo);
         testContent.innerHTML = content;
@@ -390,23 +402,81 @@
     const tmpDoc = new DOMParser().parseFromString('<div>' + rawHTML + '</div>', 'text/html');
     const root = tmpDoc.body.firstChild;
 
-    let passageParts = [];      // passage paragraphs only
-    let questionParts = [];     // raw question HTML (used to build interactive form)
-    let allContentParts = [];   // passage + raw questions (in original document order)
+    // Fix images (diagrams, charts, tables-as-images) so they load in BOTH
+    // panes: resolve lazy-load attributes, make URLs absolute, and route
+    // through the wsrv.nl proxy to bypass hotlink protection.
+    root.querySelectorAll('img').forEach(img => {
+      const dataSrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original');
+      const curSrc = img.getAttribute('src') || '';
+      if (dataSrc && (!curSrc || curSrc.includes('data:') || curSrc.includes('placeholder'))) {
+        img.setAttribute('src', dataSrc);
+      }
+      let src = img.getAttribute('src') || '';
+      if (src && !src.startsWith('http') && !src.startsWith('data:')) {
+        src = 'https://practicepteonline.com' + (src.startsWith('/') ? '' : '/') + src;
+        img.setAttribute('src', src);
+      }
+      ['srcset', 'data-srcset', 'data-src', 'data-lazy-src', 'loading', 'crossorigin', 'width', 'height']
+        .forEach(a => img.removeAttribute(a));
+      src = img.getAttribute('src') || '';
+      if (src && src.startsWith('http') && !src.includes('wsrv.nl')) {
+        img.setAttribute('src', `https://wsrv.nl/?url=${encodeURIComponent(src)}`);
+      }
+    });
+
+    // Every block in original order, tagged with which pane it belongs to.
+    // Kept as objects so a misclassified block can be re-tagged later
+    // (e.g. a passage title swept into the question side).
+    const contentEntries = []; // {html, text, q, hasImg}
     let inQuestions = false;
     let reachedAnswers = false;
-    let lastQuestionEnd = 0; // highest question number we've seen so far
+    let lastQuestionEnd = 0;    // highest question number we've seen so far
+    let groupEnd = 0;           // end number of the current question group
+    let maxSeenQ = 0;           // highest question/blank number seen in this group
+    let chooseEndLetter = null; // "Choose TWO letters, A-E" → 'E'
+    let lettersDone = false;    // that final option letter has appeared
+    let groupImgSeen = false;   // group contains an image (diagram labelling)
 
-    const children = Array.from(root.children);
+    // Some tests wrap the ENTIRE test (all passages + questions) in one giant
+    // <div>, so root.children would be a single block and nothing could be
+    // separated. Descend into container divs that hold multiple block-level
+    // children to recover a flat list of real blocks. Tests whose blocks are
+    // already direct <p>/<h*> children are unaffected (we never descend into
+    // a <p>, <table>, etc.).
+    function flattenBlocks(parent) {
+      const out = [];
+      Array.from(parent.children).forEach(ch => {
+        const tag = (ch.tagName || '').toLowerCase();
+        if (tag === 'div' || tag === 'section' || tag === 'article') {
+          const blockKids = Array.from(ch.children).filter(c =>
+            /^(p|h[1-6]|div|section|article|table|figure|ul|ol|blockquote|img)$/i.test(c.tagName || ''));
+          if (blockKids.length >= 2) {
+            out.push(...flattenBlocks(ch));
+            return;
+          }
+        }
+        out.push(ch);
+      });
+      return out;
+    }
+    const children = flattenBlocks(root);
 
     // Helper: does this element look like the start of a new passage?
     function looksLikeNewPassageStart(el, text) {
       const t = text.trim();
       if (!t) return false;
+      // Gap-fill markers ("(32) ……", "______") mean question content (summary/
+      // notes/table completion), never a passage start
+      if (/[.…_]{4,}/.test(t)) return false;
+      if (/\(\d{1,2}\)\s*[.…_]/.test(t)) return false;
       // Skip blocks that are obviously question-related
       if (/Questions?\s+\d/i.test(t)) return false;
       if (/^\s*[\(\[]?\d{1,2}[\.\)\]]?\s+\S/.test(t)) return false;
       if (/^(Choose|Match|Complete|Write|Look at|Do the following|Which|Using)\b/i.test(t)) return false;
+      // Instruction sentences that merely mention the passage
+      // ("Reading Passage 3 has eight paragraphs, A-H. Which paragraph…")
+      if (/\bhas\s+\w+\s+(paragraphs|sections)\b/i.test(t)) return false;
+      if (/answer\s+sheet|in\s+boxes\s+\d/i.test(t)) return false;
 
       // Explicit passage marker
       if (/^\s*(READING\s+)?PASSAGE\s+(\d+|ONE|TWO|THREE|I{1,3})\b/i.test(t)) return true;
@@ -427,6 +497,9 @@
     function looksLikeProsePassage(el, text) {
       const t = text.trim();
       if (!t || t.length < 200) return false;
+      // Summary/notes bodies contain gap markers — they are question content
+      if (/[.…_]{4,}/.test(t)) return false;
+      if (/\(\d{1,2}\)\s*[.…_]/.test(t)) return false;
       if (/Questions?\s+\d{1,2}\s*[-–—]\s*\d{1,2}/i.test(t)) return false;
       if (/Questions?\s+\d{1,2}\s+and\s+\d{1,2}/i.test(t)) return false;
       if (/^\s*[\(\[]?\d{1,2}[\.\)\]]?\s+\S/.test(t)) return false; // numbered question
@@ -440,59 +513,204 @@
       return sentenceCount >= 2;
     }
 
-    for (const el of children) {
-      const text = el.textContent || '';
+    // Index of the LAST block that opens a question group. The ambiguous
+    // answer-key heuristics below must never fire BEFORE this point — a
+    // matching-headings list like "1. Paragraph A2. Paragraph B3. Paragraph C"
+    // looks exactly like a concatenated answer key but is real question
+    // content with more "Questions N-M" groups still to come.
+    let lastQHeaderIdx = -1;
+    children.forEach((c, ci) => {
+      const ct = (c.textContent || '');
+      if (/Questions?\s+\d{1,2}\s*[-–—]\s*\d{1,2}/i.test(ct) ||
+          /Questions?\s+\d{1,2}\s+and\s+\d{1,2}/i.test(ct)) {
+        lastQHeaderIdx = ci;
+      }
+    });
 
-      // Detect answer/explanation section — stop processing
-      const tt = text.trim();
-      if (/^Explanations?:/i.test(tt) ||
-          /^Questions?\s+\d+[\s-]+\d+\s+are\s+of/i.test(tt)) {
+    for (let ci = 0; ci < children.length; ci++) {
+      const topEl = children[ci];
+      const wholeText = ((topEl.textContent || '')).trim();
+      const pastLastGroup = ci > lastQHeaderIdx;
+
+      // Detect answer/explanation section — stop processing. Checked on the
+      // WHOLE element (before any <br>-splitting) so the concatenated
+      // answer-key pattern can't be broken apart and missed.
+      if (/^Explanations?:/i.test(wholeText) ||
+          /^Questions?\s+\d+[\s-]+\d+\s+are\s+of/i.test(wholeText)) {
         reachedAnswers = true;
       }
       // "Show Answers" / "Answer Key" / "Answers:" marker (often a standalone block)
-      if (/^(?:Show\s+)?Answers?(?:\s+Key)?:?\s*$/i.test(tt)) {
+      if (/^(?:Show\s+)?Answers?(?:\s+Key)?:?\s*$/i.test(wholeText)) {
         reachedAnswers = true;
       }
       // Concatenated answer block ("1. tomatoes2. urban centres3. energy..."
-      // or "1. False\n2. True\n...") — three sequential numbered short items
-      // at the start of the block is unmistakable.
-      if (/^\s*1\s*[\.\)]\s*\S[^]{0,40}?\s*2\s*[\.\)]\s*\S[^]{0,40}?\s*3\s*[\.\)]\s*\S/.test(tt)) {
+      // or "1. False\n2. True\n...") — three sequential numbered short items.
+      // Only valid AFTER the final question group, else it catches matching
+      // lists ("1. Paragraph A2. Paragraph B…").
+      if (pastLastGroup &&
+          /^\s*1\s*[\.\)]\s*\S[^]{0,40}?\s*2\s*[\.\)]\s*\S[^]{0,40}?\s*3\s*[\.\)]\s*\S/.test(wholeText)) {
         reachedAnswers = true;
       }
       // Single-line "1. True/False/..." answer block
-      if (/^\s*1\.\s*(True|False|Not\s*Given|Yes|No)\b/im.test(text) && tt.length < 20) {
+      if (pastLastGroup &&
+          /^\s*1\.\s*(True|False|Not\s*Given|Yes|No)\b/im.test(topEl.textContent || '') && wholeText.length < 20) {
         reachedAnswers = true;
       }
       if (reachedAnswers) continue;
+
+      // "Cambridge IELTS Tests 1 to 17" is a watermark this site prints
+      // between every passage — a reliable separator. Drop it AND use it to
+      // end the current question group so the next passage's title and prose
+      // flip back to the passage pane instead of leaking into the questions.
+      if (/^Cambridge\s+IELTS\s+Tests?\b/i.test(wholeText) && wholeText.length < 80) {
+        inQuestions = false;
+        continue;
+      }
+
+      // A question-zone <p> often glues many lines with <br>: the group
+      // header, statements, options — and sometimes the START OF THE NEXT
+      // PASSAGE. Split those so each line is classified on its own;
+      // ordinary passage paragraphs are left intact.
+      let parts = [topEl];
+      if (topEl.querySelector && topEl.querySelector('br') &&
+          (inQuestions || /Questions?\s+\d/i.test(wholeText))) {
+        const segs = topEl.innerHTML.split(/<br\s*\/?>/i);
+        if (segs.length > 1) {
+          const segEls = [];
+          segs.forEach(seg => {
+            const tmp = tmpDoc.createElement('p');
+            tmp.innerHTML = seg;
+            if ((tmp.textContent || '').trim() || tmp.querySelector('img')) segEls.push(tmp);
+          });
+          if (segEls.length) parts = segEls;
+        }
+      }
+
+      for (const el of parts) {
+      const text = el.textContent || '';
+      const tt = text.trim();
 
       // Check if this element starts a NEW question section.
       // Match "Questions X-Y" range, "Questions X and Y" pair, or singular "Question X".
       const qGroupMatch = text.match(/Questions?\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})/i)
         || text.match(/Questions?\s+(\d{1,2})\s+and\s+(\d{1,2})/i)
         || text.match(/(?:^|\b)Question\s+(\d{1,2})(?!\s*[-–—\d])/i);
+      let justFlipped = false;
       if (qGroupMatch) {
         inQuestions = true;
         const lastNum = qGroupMatch[2] ? parseInt(qGroupMatch[2]) : parseInt(qGroupMatch[1]);
         lastQuestionEnd = Math.max(lastQuestionEnd, lastNum);
+        groupEnd = lastNum;
+        maxSeenQ = 0;
+        chooseEndLetter = null;
+        lettersDone = false;
+        groupImgSeen = false;
       } else if (inQuestions) {
+        // Track evidence that the current group's numbered questions/blanks
+        // have actually appeared ("34.", "(34)", "34 ……"). Until the group is
+        // complete, its content (summary bodies, word lists, tables) must NOT
+        // be handed back to the passage pane.
+        const leadNum = tt.match(/^\s*[\(\[]?(\d{1,2})[\.\)\]]?\s+/);
+        if (leadNum) {
+          const n = parseInt(leadNum[1]);
+          if (n >= 1 && n <= 40) maxSeenQ = Math.max(maxSeenQ, n);
+        }
+        let nm;
+        const parenNumRe = /\((\d{1,2})\)/g;
+        while ((nm = parenNumRe.exec(tt)) !== null) {
+          const n = parseInt(nm[1]);
+          if (n >= 1 && n <= 40) maxSeenQ = Math.max(maxSeenQ, n);
+        }
+        const gapNumRe = /\b(\d{1,2})\s*[.…_]{3,}/g;
+        while ((nm = gapNumRe.exec(tt)) !== null) {
+          const n = parseInt(nm[1]);
+          if (n >= 1 && n <= 40) maxSeenQ = Math.max(maxSeenQ, n);
+        }
+        // Statements are often glued into ONE block ("…TV Dinner. 13. The US
+        // frozen…" / "12 Swanson Foods…") — scan the whole text, not just the
+        // leading number, or the gate below never opens and the next passage
+        // gets swept into the questions pane.
+        const inlineNumRe = /\b(\d{1,2})[\.\)]\s*[A-Z(“"']/g;
+        while ((nm = inlineNumRe.exec(tt)) !== null) {
+          const n = parseInt(nm[1]);
+          if (n >= 1 && n <= 40) maxSeenQ = Math.max(maxSeenQ, n);
+        }
+        const bareNumRe = /(?:^|\s)(\d{1,2})\s+[A-Z]/g;
+        while ((nm = bareNumRe.exec(tt)) !== null) {
+          const n = parseInt(nm[1]);
+          if (n >= 1 && n <= 40) maxSeenQ = Math.max(maxSeenQ, n);
+        }
+
+        // "Choose TWO letters, A-E" groups have no numbered lines — they are
+        // complete once the final option letter (E) has appeared.
+        const chooseM = tt.match(/Choose\s+(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN)\s+letters?[,\s]*\(?([A-H])\s*(?:[-–—~]|to\s)\s*([B-K])/i);
+        if (chooseM) chooseEndLetter = chooseM[2].toUpperCase();
+        // Same for single-answer MC: "Choose the correct letter, A, B, C or D."
+        // (a lone "Question 13" group has no numbered lines either)
+        if (!chooseM && !chooseEndLetter) {
+          const mcDecl = tt.match(/Choose\s+the\s+correct\s+letters?\b.{0,40}?\s+or\s+([A-K])\b/i);
+          if (mcDecl) chooseEndLetter = mcDecl[1].toUpperCase();
+        }
+        if (chooseEndLetter && !lettersDone) {
+          const endRe = new RegExp('(?:^|[\\s,;:.])' + chooseEndLetter + '\\s+\\S');
+          if (endRe.test(tt)) lettersDone = true;
+        }
+
+        // Diagram/flow-chart groups number their blanks inside an image —
+        // once an image has appeared, treat the group as complete.
+        if (el.querySelector && el.querySelector('img')) groupImgSeen = true;
+
         // Are we transitioning back to a passage?
-        if (looksLikeNewPassageStart(el, text) || looksLikeProsePassage(el, text)) {
+        const groupSatisfied = maxSeenQ >= groupEnd || lettersDone || groupImgSeen;
+        // Only a STANDALONE "READING PASSAGE 2" line is an unconditional
+        // passage start — instructions like "Reading Passage 3 has eight
+        // paragraphs, A-H. Which paragraph…" must stay with the questions.
+        const strongPassageStart = /^\s*(READING\s+)?PASSAGE\s+(\d+|ONE|TWO|THREE|I{1,3})\s*[:.\-–—]?\s*$/i.test(tt);
+        if (strongPassageStart ||
+            (groupSatisfied && (looksLikeNewPassageStart(el, text) || looksLikeProsePassage(el, text)))) {
           inQuestions = false;
+          justFlipped = true;
         }
       }
 
       if (inQuestions) {
-        questionParts.push(el.outerHTML);
-        // Wrap question blocks on the passage side so they're visually distinct
-        allContentParts.push(`<div class="passage-question-block">${el.outerHTML}</div>`);
+        contentEntries.push({
+          html: el.outerHTML,
+          text: tt,
+          q: true,
+          hasImg: !!(el.querySelector && el.querySelector('img'))
+        });
       } else {
-        passageParts.push(el.outerHTML);
-        allContentParts.push(el.outerHTML);
+        // We just flipped back to passage prose — the new passage's short
+        // title (and possibly a subtitle) may have been swept into the
+        // question side. Pull trailing title-like blocks back out.
+        if (justFlipped) {
+          let moved = 0;
+          for (let k = contentEntries.length - 1; k >= 0 && moved < 2; k--) {
+            const en = contentEntries[k];
+            if (!en.q || en.hasImg) break;
+            const s = en.text || '';
+            if (!s || s.length >= 150) break;
+            if (/Questions?\s+\d/i.test(s)) break;
+            if (/^\s*[\(\[]?\d{1,2}[\.\)\]]?\s/.test(s)) break;
+            if (/^[A-K][\.\)]?\s/.test(s)) break;
+            if (/[.…_]{4,}/.test(s) || /\(\d{1,2}\)/.test(s)) break;
+            if (/^(Choose|Match|Complete|Write|Look\s+at|Do\s+the|Which|Using|In\s+boxes|NB|List\s+of)\b/i.test(s)) break;
+            if (/\b(TRUE|FALSE|NOT\s*GIVEN|YES|NO)\b/.test(s)) break;
+            en.q = false;
+            moved++;
+          }
+        }
+        contentEntries.push({ html: el.outerHTML, text: tt, q: false, hasImg: false });
+      }
       }
     }
 
-    let passageHTML = allContentParts.join('');
-    const questionsRawHTML = questionParts.join('');
+    // Wrap question blocks on the passage side so they're visually distinct
+    let passageHTML = contentEntries
+      .map(en => en.q ? `<div class="passage-question-block">${en.html}</div>` : en.html)
+      .join('');
+    const questionsRawHTML = contentEntries.filter(en => en.q).map(en => en.html).join('');
 
     // Build interactive questions
     const questionsHTML = buildInteractiveQuestions(questionsRawHTML, answersData);
@@ -504,12 +722,24 @@
   function buildInteractiveQuestions(rawHTML, answers) {
     const tmpDoc = new DOMParser().parseFromString('<div>' + rawHTML + '</div>', 'text/html');
     const root = tmpDoc.body.firstChild;
+    const topChildren = Array.from(root.children);
 
     // Walk DOM and collect block-level units, preserving order.
-    // Each block has its trimmed/normalized text. This lets us match
-    // numbered questions reliably without relying on a flattened string.
+    // Each block records its normalized text, any images it contains, and the
+    // index of its top-level ancestor (used to recover original HTML — tables,
+    // images, layout — when rendering notes/summary groups).
     const blocks = [];
-    function pushBlock(el) {
+
+    function imgsOf(el) {
+      if (!el || !el.querySelectorAll) return [];
+      const all = el.tagName === 'IMG' ? [el] : Array.from(el.querySelectorAll('img'));
+      // Skip data: URLs — lazy-load placeholder pixels, not real diagrams
+      return all
+        .filter(im => !(im.getAttribute('src') || '').startsWith('data:'))
+        .map(im => im.outerHTML);
+    }
+
+    function pushBlock(el, topIdx) {
       // If the element contains <br> separators, split it into per-line blocks
       // so that "9. ...<br/>10. ...<br/>11. ..." becomes 3 separate question blocks.
       if (el.querySelector && el.querySelector('br')) {
@@ -518,30 +748,36 @@
           const tmp = el.ownerDocument.createElement('div');
           tmp.innerHTML = seg;
           const txt = (tmp.textContent || '').replace(/\s+/g, ' ').trim();
-          if (txt) blocks.push({ el: tmp, text: txt });
+          const imgs = imgsOf(tmp);
+          if (txt || imgs.length) blocks.push({ el: tmp, text: txt, imgs, topIdx });
         });
         return;
       }
       const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (txt) blocks.push({ el, text: txt });
+      const imgs = imgsOf(el);
+      if (txt || imgs.length) blocks.push({ el, text: txt, imgs, topIdx });
     }
-    function walk(parent) {
+
+    function walk(parent, inheritedTop) {
       Array.from(parent.children).forEach(child => {
+        const topIdx = (inheritedTop === undefined) ? topChildren.indexOf(child) : inheritedTop;
         const tag = child.tagName.toLowerCase();
         if (['p','li','h1','h2','h3','h4','h5','h6','blockquote','td','th'].includes(tag)) {
-          pushBlock(child);
+          pushBlock(child, topIdx);
         } else if (['ul','ol','table','tbody','thead','tr','section','article'].includes(tag)) {
-          walk(child);
+          walk(child, topIdx);
+        } else if (tag === 'figure' || tag === 'img') {
+          pushBlock(child, topIdx);
         } else if (tag === 'div') {
           const hasBlockKids = Array.from(child.children).some(c =>
-            ['p','li','div','ul','ol','table','h1','h2','h3','h4','h5','h6','blockquote'].includes(c.tagName.toLowerCase())
+            ['p','li','div','ul','ol','table','h1','h2','h3','h4','h5','h6','blockquote','figure'].includes(c.tagName.toLowerCase())
           );
-          if (hasBlockKids) walk(child);
-          else pushBlock(child);
+          if (hasBlockKids) walk(child, topIdx);
+          else pushBlock(child, topIdx);
         }
       });
     }
-    walk(root);
+    walk(root, undefined);
 
     // If no blocks found, fall back to splitting the raw text by <br>
     if (blocks.length === 0) {
@@ -549,7 +785,7 @@
       fallback.forEach(chunk => {
         const tmp = new DOMParser().parseFromString(chunk, 'text/html');
         const txt = (tmp.body.textContent || '').replace(/\s+/g, ' ').trim();
-        if (txt) blocks.push({ el: null, text: txt });
+        if (txt) blocks.push({ el: null, text: txt, imgs: [], topIdx: -1 });
       });
     }
 
@@ -580,11 +816,59 @@
       return rawHTML + buildAnswerBar(answers);
     }
 
+    // The source sometimes omits a group header entirely (e.g. diagram
+    // labelling whose question numbers 20-26 exist only inside the image).
+    // Insert a synthetic group for any numeric gap between consecutive
+    // headers so those answer boxes still exist.
+    for (let i = 0; i < groups.length - 1; i++) {
+      const gapStart = groups[i].end + 1;
+      const gapEnd = groups[i + 1].start - 1;
+      if (gapStart <= gapEnd && gapEnd - gapStart < 15) {
+        groups.splice(i + 1, 0, {
+          start: gapStart,
+          end: gapEnd,
+          blockIdx: groups[i + 1].blockIdx,
+          title: 'Questions ' + (gapStart === gapEnd ? gapStart : gapStart + '-' + gapEnd),
+          synthetic: true
+        });
+        i++;
+      }
+    }
+    const strayTexts = {}; // numbered lines that belong to a synthetic group
+
     let html = '';
+    // Images placed between a group's last question and the next group header
+    // (diagrams are often laid out just above "Questions 20-26") are carried
+    // over to the group they belong to.
+    let pendingGroupImgs = [];
     groups.forEach((grp, gi) => {
       const startIdx = grp.blockIdx;
       const endIdx = (gi < groups.length - 1) ? groups[gi + 1].blockIdx : blocks.length;
       const grpBlocks = blocks.slice(startIdx, endIdx);
+      const inheritedImgs = pendingGroupImgs;
+      pendingGroupImgs = [];
+
+      // Synthetic group (header missing from the source): render the
+      // inherited diagram image and an answer box per question.
+      if (grp.synthetic) {
+        html += `<div class="question-group">`;
+        html += `<div class="question-group-title">${escapeHTML(grp.title)}</div>`;
+        if (inheritedImgs.length) {
+          html += `<div class="question-group-images">${inheritedImgs.join('')}</div>`;
+        }
+        for (let q = grp.start; q <= grp.end; q++) {
+          const answer = answers[q] || '';
+          const qText = (strayTexts[q] || '').replace(/(?:\.{3,}|_{3,})/g, '_______').trim();
+          html += `<div class="question-item" data-q="${q}" data-answer="${escapeAttr(answer)}">`;
+          html += `<span class="question-number">${q}</span>`;
+          html += `<div class="question-text">`;
+          if (qText) html += `<div class="q-statement">${escapeHTML(qText)}</div>`;
+          html += `<input type="text" class="answer-input" data-q="${q}" placeholder="Answer for (${q})...">`;
+          html += `</div></div>`;
+        }
+        html += `</div>`;
+        return; // continue forEach
+      }
 
       // Find first block that is a numbered question matching grp.start.
       // A question block starts with: "1.", "1)", "[1]", or "1 ".
@@ -599,6 +883,48 @@
 
       let firstQIdx = grpBlocks.findIndex((b, i) => i > 0 && numberedAt(b, grp.start));
       if (firstQIdx === -1) firstQIdx = grpBlocks.length;
+      // No numbered blocks at all — the whole group is instruction + options
+      const noNumbered = firstQIdx === grpBlocks.length;
+
+      // Instruction = blocks between title block (index 0) and first question
+      const instructionBlocks = grpBlocks.slice(1, firstQIdx);
+      const instructionText = instructionBlocks.map(b => b.text).join(' ');
+
+      // ---- Letters declared by the instruction ----
+      // "Choose TWO letters, A-E" / "A~E" / "A to E" / "researcher, A, B or C"
+      let declaredLetters = [];
+      const rangeDecl = instructionText.match(/\b([A-H])\s*(?:[-–—~]|to\s)\s*([B-K])\b/);
+      if (rangeDecl && rangeDecl[2].charCodeAt(0) > rangeDecl[1].charCodeAt(0) &&
+          rangeDecl[2].charCodeAt(0) - rangeDecl[1].charCodeAt(0) <= 10) {
+        for (let c = rangeDecl[1].charCodeAt(0); c <= rangeDecl[2].charCodeAt(0); c++) {
+          declaredLetters.push(String.fromCharCode(c));
+        }
+      }
+      if (declaredLetters.length === 0) {
+        // Tolerate the source typo "A. B, C or D" and the Oxford comma
+        // "A, B, or C" (test sources use both)
+        const orDecl = instructionText.match(/\b([A-K](?:\s*[.,]\s*[A-K])+)\s*[.,]?\s+or\s+([A-K])\b/);
+        if (orDecl) {
+          declaredLetters = orDecl[1].split(/\s*[.,]\s*/).map(s => s.trim()).concat(orDecl[2]);
+        }
+      }
+
+      // Detect question type from the instruction text + early question samples.
+      // Use generous lookups so detection succeeds even when option lists wrap to new paragraphs.
+      const detectionText = [
+        instructionText,
+        grpBlocks.slice(firstQIdx, firstQIdx + 4).map(b => b.text).join(' ')
+      ].join(' ');
+      const isTFNG = /\bTRUE\b[\s\S]{0,300}\bFALSE\b[\s\S]{0,300}\bNOT\s*GIVEN\b/i.test(detectionText)
+        || /statements?\s+agree\s+with\s+the\s+(information|claims|views)/i.test(detectionText) && /\bTRUE\b/i.test(detectionText);
+      const isYNNG = !isTFNG && (/\bYES\b[\s\S]{0,300}\bNO\b[\s\S]{0,300}\bNOT\s*GIVEN\b/i.test(detectionText)
+        || (/claims|views|opinions/i.test(detectionText) && /\bYES\b/i.test(detectionText) && /\bNOT\s*GIVEN\b/i.test(detectionText)));
+      const isMC = /Choose\s+the\s+correct\s+letter/i.test(detectionText);
+      // "Choose TWO/THREE letters, A-E" — a group answered by a set of letters
+      const isMultiSelect = !isMC && /\bChoose\s+(TWO|THREE|FOUR|FIVE|SIX|SEVEN)\s+letters?\b/i.test(detectionText);
+      let isMatching = /Match\s+(each|the)\b|List\s+of\s+People|list\s+of\s+(headings|theories|researchers|findings|people|names|dates|scientists|writers|experts|statements|countries)/i.test(detectionText);
+      const isSectionMatch = /Which\s+(section|paragraph)/i.test(detectionText);
+      const isSentenceEnd = /Complete\s+each\s+sentence.*?ending/i.test(detectionText);
 
       // ---- Embedded-blanks detection ----
       // If no block in this group starts with a numbered question, but the group's
@@ -607,7 +933,7 @@
       // notes block as the prompt and show numbered inputs below.
       const groupFullText = grpBlocks.slice(1).map(b => b.text).join(' ');
       let isEmbeddedBlanks = false;
-      if (firstQIdx === grpBlocks.length) {
+      if (firstQIdx === grpBlocks.length && !isMultiSelect) {
         const blankMarkers = [];
         // Match the blank that follows the number — regular dots (.....),
         // Unicode horizontal ellipsis (…), underscores (_____), or any
@@ -623,18 +949,73 @@
       }
 
       if (isEmbeddedBlanks) {
-        // Render the full notes/table content (HTML preserved) as a single prompt
-        const notesHTML = grpBlocks.slice(1)
-          .map(b => {
-            if (!b.el) return `<p>${escapeHTML(b.text)}</p>`;
-            // Split <br>-blocks live in throwaway <div>s — re-wrap in <p>
-            if (b.el.tagName === 'DIV') return `<p>${b.el.innerHTML}</p>`;
-            return b.el.outerHTML;
-          })
-          .join('');
+        // Render the notes/table/summary as a single prompt. Prefer the
+        // ORIGINAL top-level elements between this group's title and the next
+        // group — that preserves tables, images and flow-chart layout exactly
+        // as they appear on the source page.
+        let notesHTML = '';
+        const titleTop = grpBlocks[0].topIdx;
+        const nextTop = (gi < groups.length - 1 && blocks[groups[gi + 1].blockIdx].topIdx >= 0)
+          ? blocks[groups[gi + 1].blockIdx].topIdx
+          : topChildren.length;
+        if (titleTop >= 0 && nextTop > titleTop + 1) {
+          // Blocks that share the title's top element (split by <br>) would be
+          // skipped by the element slice — re-add their content first.
+          const sameTopExtras = grpBlocks.slice(1)
+            .filter(b => b.topIdx === titleTop && b.el)
+            .map(b => `<p>${b.el.innerHTML}</p>`)
+            .join('');
+          const els = topChildren.slice(titleTop + 1, nextTop).filter(el => {
+            const t = (el.textContent || '').trim();
+            if (/^\s*Example\b/i.test(t)) return false;
+            if (/^\s*Cambridge\s+IELTS\s+Tests?\b/i.test(t)) return false;
+            return true;
+          });
+          notesHTML = sameTopExtras + els.map(el => el.outerHTML).join('');
+        }
+        if (!notesHTML.trim()) {
+          notesHTML = grpBlocks.slice(1)
+            .map(b => {
+              if (!b.el) return `<p>${escapeHTML(b.text)}</p>`;
+              // Split <br>-blocks live in throwaway <div>s — re-wrap in <p>
+              if (b.el.tagName === 'DIV') return `<p>${b.el.innerHTML}</p>`;
+              return b.el.outerHTML;
+            })
+            .join('');
+        }
+
+        // Word list inside the notes ("A. nurture  B. organs …" or bare
+        // "A nurture") → offer letter dropdowns instead of free-text inputs.
+        const wordList = [];
+        let expectLetter = 'A';
+        grpBlocks.slice(1).forEach(b => {
+          const m = b.text.match(/^\s*([A-K])[\.\)]?\s+(\S.*)$/);
+          if (m && m[1] === expectLetter && !/^\s*\d/.test(m[2]) &&
+              m[2].length < 120 &&
+              (declaredLetters.length === 0 || declaredLetters.includes(m[1]))) {
+            wordList.push({ letter: m[1], text: m[2].trim() });
+            expectLetter = String.fromCharCode(expectLetter.charCodeAt(0) + 1);
+          }
+        });
+        if (wordList.length < 2 && declaredLetters.length >= 2) {
+          for (const b of grpBlocks.slice(1)) {
+            const split = splitBareLetterSeq(b.text, declaredLetters);
+            if (split) {
+              wordList.length = 0;
+              wordList.push(...split.entries);
+              break;
+            }
+          }
+        }
+        const useSelect = wordList.length >= 2 ||
+          (declaredLetters.length >= 2 && /list\s+of\s+words/i.test(instructionText));
+        const selLetters = wordList.length >= 2 ? wordList.map(w => w.letter) : declaredLetters;
 
         html += `<div class="question-group">`;
         html += `<div class="question-group-title">${escapeHTML(grp.title)}</div>`;
+        if (inheritedImgs.length) {
+          html += `<div class="question-group-images">${inheritedImgs.join('')}</div>`;
+        }
         html += `<div class="question-group-instruction embedded-notes">${notesHTML}</div>`;
 
         for (let q = grp.start; q <= grp.end; q++) {
@@ -642,27 +1023,36 @@
           html += `<div class="question-item" data-q="${q}" data-answer="${escapeAttr(answer)}">`;
           html += `<span class="question-number">${q}</span>`;
           html += `<div class="question-text">`;
-          html += `<input type="text" class="answer-input" data-q="${q}" placeholder="Answer for (${q})...">`;
+          if (useSelect && selLetters.length) {
+            html += `<select class="answer-select" data-q="${q}"><option value="">Select</option>`;
+            selLetters.forEach((l, li) => {
+              const w = (wordList[li] && wordList[li].letter === l) ? wordList[li].text : '';
+              html += `<option value="${l}"${w ? ` data-text="${escapeAttr(w)}"` : ''}>${l}${w ? '. ' + escapeHTML(w) : ''}</option>`;
+            });
+            html += `</select>`;
+          } else {
+            html += `<input type="text" class="answer-input" data-q="${q}" placeholder="Answer for (${q})...">`;
+          }
           html += `</div></div>`;
         }
         html += `</div>`;
         return; // continue forEach
       }
 
-      // Instruction = blocks between title block (index 0) and first question
-      const instructionBlocks = grpBlocks.slice(1, firstQIdx);
-      const instructionText = instructionBlocks.map(b => b.text).join(' ');
-      const instructionHTML = instructionBlocks.map(b => `<p>${escapeHTML(b.text)}</p>`).join('');
-
       // Walk ALL grpBlocks (after the title) to extract:
-      //   - numbered questions   → qTexts[N]
-      //   - "List of X" header   → enters list-collection mode
-      //   - letter entries A./B. → matchingList (for List of People/etc.)
+      //   - numbered questions      → qTexts[N]
+      //   - images                  → qImgs[N] / instrImgs (diagrams, charts)
+      //   - "List of X" header      → enters list-collection mode
+      //   - letter entries A./B.    → matchingList (for List of People/etc.)
+      //   - bare letter entries A x → matchingList (researchers, endings, TWO-letter options)
       //   - Roman numeral entries i/ii/iii… → matchingList (for List of Headings)
-      //   - "Example…" lines     → skipped (don't pollute question text)
-      //   - other blocks         → appended to current question text
+      //   - "Example…" lines        → skipped (don't pollute question text)
+      //   - other blocks            → appended to current question text
       const qTexts = {};
+      const qImgs = {};
+      const instrImgs = inheritedImgs.slice();
       const matchingList = []; // [{letter, text}]
+      let listFromInstructions = false; // list already visible in the instruction box
       let curQ = null;
       let curParts = [];
       let collectingList = false;
@@ -676,14 +1066,31 @@
       // Valid lowercase Roman numerals 1–30 (and a few uppercase variants)
       const ROMAN_RE = /^(i{1,3}|iv|v|vi{1,3}|ix|x|xi{1,3}|xiv|xv|xvi{1,3}|xix|xx|xxi{1,3}|xxiv|xxv|xxvi{1,3}|xxix|xxx)$/i;
 
-      grpBlocks.slice(1).forEach(b => {
+      for (let bi = 1; bi < grpBlocks.length; bi++) {
+        const b = grpBlocks[bi];
+
         // Skip worked-example hints between numbered questions in heading-match groups:
         //   "Example Answer", "Example:", "Example)", "Example  Paragraph A  vii"
         //   "Paragraph A  vii"  /  "Section D  ix"  (no explicit Example prefix)
-        if (/^\s*Example\b/i.test(b.text)) return;
-        if (/^\s*(Paragraph|Section|Passage)\s+[A-J]\s+[ivx]+\s*$/i.test(b.text)) return;
+        if (/^\s*Example\b/i.test(b.text)) continue;
+        if (/^\s*(Paragraph|Section|Passage)\s+[A-K]\s+[ivx]+\s*$/i.test(b.text)) continue;
         // Skip site footer/watermark text like "Cambridge IELTS Test 1 to 17"
-        if (/^\s*Cambridge\s+IELTS\s+Tests?\b/i.test(b.text)) return;
+        if (/^\s*Cambridge\s+IELTS\s+Tests?\b/i.test(b.text)) continue;
+
+        // Images stay with the question being built, or with the group
+        // instruction if no question is open yet (diagram/chart prompts).
+        // An image AFTER the group's final question belongs to the NEXT
+        // group — diagrams often sit right above the next "Questions" header.
+        if (b.imgs && b.imgs.length) {
+          if (curQ !== null && curQ === grp.end && gi < groups.length - 1) {
+            pendingGroupImgs.push(...b.imgs);
+          } else if (curQ !== null) {
+            (qImgs[curQ] = qImgs[curQ] || []).push(...b.imgs);
+          } else {
+            instrImgs.push(...b.imgs);
+          }
+          if (!b.text) continue;
+        }
 
         // Numbered question start
         const numM = b.text.match(/^\s*[\(\[]?(\d{1,2})[\.\)\]]?\s+(.*)$/);
@@ -693,7 +1100,16 @@
             flush();
             curQ = n; curParts = numM[2] ? [numM[2]] : [];
             collectingList = false;
-            return;
+            continue;
+          }
+          // A numbered line that belongs to a missing-header (synthetic)
+          // group — keep its text for that group, never glue it onto the
+          // current question.
+          if (n >= 1 && n <= 40 && groups.some(g => g.synthetic && n >= g.start && n <= g.end)) {
+            flush();
+            curQ = null;
+            strayTexts[n] = numM[2] || '';
+            continue;
           }
         }
 
@@ -703,10 +1119,12 @@
           flush();
           curQ = null;
           collectingList = true;
+          b._listEntry = true;
+          if (bi < firstQIdx) listFromInstructions = true;
           const rest = b.text.replace(/^\s*List\s+of\s+\w+\s*[:.\-]?\s*/i, '');
           if (rest) {
             // Letter form
-            const reA = /([A-H])[\.\)]\s+(.+?)(?=\s+[A-H][\.\)]\s|$)/g;
+            const reA = /([A-K])[\.\)]\s+(.+?)(?=\s+[A-K][\.\)]\s|$)/g;
             let lm;
             while ((lm = reA.exec(rest)) !== null) {
               matchingList.push({ letter: lm[1], text: lm[2].trim() });
@@ -721,19 +1139,72 @@
                 }
               }
             }
+            // Bare letters glued after the header ("List of Researchers A Galton B …")
+            if (matchingList.length === 0 && declaredLetters.length >= 2) {
+              const split = splitBareLetterSeq(rest, declaredLetters);
+              if (split) matchingList.push(...split.entries);
+            }
           }
-          return;
+          continue;
         }
 
-        // Single letter entry "A. text" or "A) text"
-        const letM = b.text.match(/^\s*([A-H])[\.\)]\s+(.+)$/);
+        // Single letter entry "A. text" or "A) text".
+        // Never collected while a multiple-choice question is open — those
+        // lines are the question's own options (the MC extractor handles them).
+        const letM = b.text.match(/^\s*([A-K])[\.\)]\s+(.+)$/);
         if (letM) {
-          if (collectingList || curQ === null || curQ === grp.end) {
+          const canCollect = collectingList || ((!isMC || noNumbered) && (curQ === null || curQ === grp.end));
+          if (canCollect) {
             flush();
             curQ = null;
             collectingList = true;
             matchingList.push({ letter: letM[1], text: letM[2].trim() });
-            return;
+            b._listEntry = true;
+            if (bi < firstQIdx) listFromInstructions = true;
+            continue;
+          }
+        }
+
+        // Bare letter entry "A text" (no period) — used by researcher lists,
+        // sentence endings and "Choose TWO letters" statements. Guarded: the
+        // letter must be declared by the instruction (or follow a "List of"
+        // header), must run in sequence A, B, C…, and the first entry needs
+        // the NEXT block to continue the sequence — so a sentence that merely
+        // starts with the article "A" is never mistaken for a list.
+        const bareM = b.text.match(/^\s*([A-K])\s+(\S.+)$/);
+        if (bareM) {
+          const letter = bareM[1];
+          const last = matchingList[matchingList.length - 1];
+          const mixedRoman = last && !/^[A-K]$/.test(last.letter);
+          const expected = (last && /^[A-K]$/.test(last.letter))
+            ? String.fromCharCode(last.letter.charCodeAt(0) + 1)
+            : 'A';
+          const inDeclared = declaredLetters.length === 0 ? collectingList : declaredLetters.includes(letter);
+          const canCollect = collectingList || ((!isMC || noNumbered) && (curQ === null || curQ === grp.end));
+          // List entries are short; a 300+ char "entry" is a leaked passage
+          // paragraph that happens to start with the next letter (A-H
+          // paragraph labels) — never absorb those.
+          const plausibleLength = bareM[2].length < 300;
+          if (!mixedRoman && canCollect && inDeclared && letter === expected && plausibleLength) {
+            let ok = collectingList || matchingList.length > 0;
+            if (!ok) {
+              const nxt = String.fromCharCode(letter.charCodeAt(0) + 1);
+              for (let bj = bi + 1; bj < grpBlocks.length; bj++) {
+                const t2 = grpBlocks[bj].text;
+                if (!t2) continue;
+                ok = new RegExp('^\\s*' + nxt + '[\\.\\)]?\\s+\\S').test(t2);
+                break;
+              }
+            }
+            if (ok) {
+              flush();
+              curQ = null;
+              collectingList = true;
+              matchingList.push({ letter, text: bareM[2].trim() });
+              b._listEntry = true;
+              if (bi < firstQIdx) listFromInstructions = true;
+              continue;
+            }
           }
         }
 
@@ -745,14 +1216,47 @@
             curQ = null;
             collectingList = true;
             matchingList.push({ letter: romM[1].toLowerCase(), text: romM[2].trim() });
-            return;
+            b._listEntry = true;
+            if (bi < firstQIdx) listFromInstructions = true;
+            continue;
           }
         }
 
         // Continuation of current numbered question
         if (curQ !== null) curParts.push(b.text);
-      });
+      }
       flush();
+
+      // Multi-select (or no-numbered MC) options glued into one instruction
+      // block: "Which TWO statements …? A Its membership… B It demands…"
+      if ((isMultiSelect || (isMC && noNumbered)) &&
+          matchingList.length === 0 && declaredLetters.length >= 2) {
+        for (const b of instructionBlocks) {
+          const dotted = [];
+          const reDot = /([A-K])[\.\)]\s+(.+?)(?=\s+[A-K][\.\)]\s|$)/g;
+          let lm;
+          while ((lm = reDot.exec(b.text)) !== null) {
+            dotted.push({ letter: lm[1], text: lm[2].trim() });
+          }
+          const seqOK = dotted.length >= 2 && dotted.every((d, di) =>
+            d.letter.charCodeAt(0) === dotted[0].letter.charCodeAt(0) + di);
+          if (seqOK) {
+            b._instrOverride = b.text.substring(0, b.text.search(/[A-K][\.\)]\s/)).trim();
+            b._listEntry = true;
+            matchingList.push(...dotted);
+            listFromInstructions = true;
+            break;
+          }
+          const split = splitBareLetterSeq(b.text, declaredLetters);
+          if (split) {
+            b._instrOverride = split.before;
+            b._listEntry = true;
+            matchingList.push(...split.entries);
+            listFromInstructions = true;
+            break;
+          }
+        }
+      }
 
       // ---- Split inline-mashed numbered questions ----
       // Source HTML sometimes lists "27 text 28.text 29.text" or even
@@ -790,15 +1294,17 @@
       // ---- Strip trailing matching-list text from the last question ----
       // Only strip if followed by 2+ letter entries — avoids killing the prose
       // phrase "list of personal possessions" that's part of the question text.
-      if (matchingList.length === 0 && qTexts[grp.end]) {
+      // Never strip from multiple-choice groups: the final MC question keeps
+      // its own "A. … B. … C. …" options, which the MC extractor consumes.
+      if (!isMC && matchingList.length === 0 && qTexts[grp.end]) {
         let lastTxt = qTexts[grp.end];
         let trailStart = -1;
         // Pattern A: "List of X" header followed by "A. word B. word ..."
-        const listHeaderM = lastTxt.match(/\bList\s+of\s+\w+\s+([A-H])[\.\)]\s/i);
+        const listHeaderM = lastTxt.match(/\bList\s+of\s+\w+\s+([A-K])[\.\)]\s/i);
         if (listHeaderM) {
           trailStart = listHeaderM.index;
         } else {
-          const letters = [...lastTxt.matchAll(/\b([A-H])[\.\)]\s+\S/g)];
+          const letters = [...lastTxt.matchAll(/\b([A-K])[\.\)]\s+\S/g)];
           if (letters.length >= 2) {
             for (let i = 0; i < letters.length - 1; i++) {
               if (letters[i+1][1].charCodeAt(0) === letters[i][1].charCodeAt(0) + 1) {
@@ -812,7 +1318,7 @@
           const trail = lastTxt.substring(trailStart)
             .replace(/^\s*List\s+of\s+\w+\s*[:.\-]?\s*/i, '');
           qTexts[grp.end] = lastTxt.substring(0, trailStart).trim();
-          const re = /([A-H])[\.\)]\s+(.+?)(?=\s+[A-H][\.\)]\s|$)/g;
+          const re = /([A-K])[\.\)]\s+(.+?)(?=\s+[A-K][\.\)]\s|$)/g;
           let lm;
           while ((lm = re.exec(trail)) !== null) {
             matchingList.push({ letter: lm[1], text: lm[2].trim() });
@@ -820,29 +1326,52 @@
         }
       }
 
-      // Detect question type from the instruction text + early question samples.
-      // Use generous lookups so detection succeeds even when option lists wrap to new paragraphs.
-      const detectionText = [
-        instructionText,
-        grpBlocks.slice(firstQIdx, firstQIdx + 4).map(b => b.text).join(' ')
-      ].join(' ');
-      const isTFNG = /\bTRUE\b[\s\S]{0,300}\bFALSE\b[\s\S]{0,300}\bNOT\s*GIVEN\b/i.test(detectionText)
-        || /statements?\s+agree\s+with\s+the\s+(information|claims|views)/i.test(detectionText) && /\bTRUE\b/i.test(detectionText);
-      const isYNNG = !isTFNG && (/\bYES\b[\s\S]{0,300}\bNO\b[\s\S]{0,300}\bNOT\s*GIVEN\b/i.test(detectionText)
-        || (/claims|views|opinions/i.test(detectionText) && /\bYES\b/i.test(detectionText) && /\bNOT\s*GIVEN\b/i.test(detectionText)));
-      const isMC = /Choose\s+the\s+correct\s+letter/i.test(detectionText);
-      const isMatching = /Match\s+each|List\s+of\s+People|list\s+of\s+(headings|theories|researchers|findings)/i.test(detectionText);
-      const isSectionMatch = /Which\s+(section|paragraph)/i.test(detectionText);
-      const isSentenceEnd = /Complete\s+each\s+sentence.*?ending/i.test(detectionText);
+      // ---- Split a trailing BARE-letter list glued to the last question ----
+      // Sentence endings often follow the final question with no punctuation:
+      // "…degradation A may improve… B may contain… C may not be…"
+      if (!isMC && !isMultiSelect && matchingList.length === 0 &&
+          declaredLetters.length >= 3 && qTexts[grp.end]) {
+        const split = splitBareLetterSeq(qTexts[grp.end], declaredLetters);
+        if (split && split.before) {
+          qTexts[grp.end] = split.before;
+          matchingList.push(...split.entries);
+        }
+      }
+
+      // A successfully extracted lettered list with plain statement questions
+      // means "match the statement to the list" even without explicit wording.
+      if (!isMatching && !isTFNG && !isYNNG && !isMC && !isMultiSelect &&
+          !isSectionMatch && matchingList.length >= 2) {
+        isMatching = true;
+      }
 
       html += `<div class="question-group">`;
       html += `<div class="question-group-title">${escapeHTML(grp.title)}</div>`;
+
+      // Instruction box. Multi-select / group-level MC option statements are
+      // excluded — they are rendered as selectable options on each question.
+      const optionsAsGroup = isMultiSelect || (isMC && noNumbered);
+      const instructionHTML = instructionBlocks
+        .filter(b => !(optionsAsGroup && b._listEntry))
+        // Drop duplicate "Questions 27-29" header echoes
+        .filter(b => !/^\s*Questions?\s+\d{1,2}\s*(?:[-–—~]\s*\d{1,2}|and\s+\d{1,2})?\s*$/i.test(b.text))
+        .map(b => {
+          const t = (b._instrOverride !== undefined) ? b._instrOverride : b.text;
+          return t ? `<p>${escapeHTML(t)}</p>` : '';
+        })
+        .join('');
       if (instructionHTML) {
         html += `<div class="question-group-instruction">${instructionHTML}</div>`;
       }
+      // Diagram/chart images that belong to this group's prompt
+      if (instrImgs.length) {
+        html += `<div class="question-group-images">${instrImgs.join('')}</div>`;
+      }
 
-      // Render matching list (e.g., "List of People") above the question items.
-      if (matchingList.length > 0) {
+      // Render the matching list above the question items — but only when it
+      // is NOT already shown word-for-word inside the instruction box (the
+      // matching-headings list used to appear twice).
+      if (matchingList.length > 0 && !listFromInstructions && !isMultiSelect) {
         html += `<div class="matching-list">`;
         html += `<div class="matching-list-title">List of options</div>`;
         html += `<ul class="matching-list-items">`;
@@ -855,7 +1384,11 @@
       // Determine letters available in the dropdown for matching questions
       const availLetters = matchingList.length > 0
         ? matchingList.map(i => i.letter)
-        : 'ABCDEFGH'.split('');
+        : (declaredLetters.length > 0 ? declaredLetters : 'ABCDEFGH'.split(''));
+
+      const groupHasImgs = instrImgs.length > 0 || Object.keys(qImgs).length > 0;
+      const multiAttr = (isMultiSelect && (matchingList.length > 0 || declaredLetters.length > 0))
+        ? ` data-multi="${grp.start}-${grp.end}"` : '';
 
       for (let q = grp.start; q <= grp.end; q++) {
         const answer = answers[q] || '';
@@ -925,15 +1458,24 @@
           }
         }
 
-        html += `<div class="question-item" data-q="${q}" data-answer="${escapeAttr(answer)}">`;
+        html += `<div class="question-item" data-q="${q}" data-answer="${escapeAttr(answer)}"${multiAttr}>`;
         html += `<span class="question-number">${q}</span>`;
         html += `<div class="question-text">`;
 
-        // ALWAYS render the statement (even if empty, render placeholder to keep layout)
-        const statementHTML = qText
-          ? escapeHTML(qText)
-          : `<em style="color:var(--text-muted);">(question text unavailable)</em>`;
-        html += `<div class="q-statement">${statementHTML}</div>`;
+        // Render the statement. The "(question text unavailable)" note is only
+        // shown when nothing else gives the question context — multi-select
+        // options and diagram images are self-explanatory.
+        const hasOwnOptions = (isMultiSelect && matchingList.length > 0)
+          || (isMC && mcOptions.length > 0)
+          || (isMC && noNumbered && matchingList.length > 0);
+        if (qText) {
+          html += `<div class="q-statement">${escapeHTML(qText)}</div>`;
+        } else if (!hasOwnOptions && !groupHasImgs) {
+          html += `<div class="q-statement"><em style="color:var(--text-muted);">(question text unavailable)</em></div>`;
+        }
+        if (qImgs[q] && qImgs[q].length) {
+          html += `<div class="q-images">${qImgs[q].join('')}</div>`;
+        }
 
         if (isTFNG) {
           html += `<div class="answer-options">`;
@@ -947,19 +1489,44 @@
             html += `<label class="answer-option"><input type="radio" name="q${q}" value="${opt}"> ${opt}</label>`;
           });
           html += `</div>`;
+        } else if (isMultiSelect && matchingList.length > 0) {
+          // "Choose TWO letters" — every question in the group offers the same
+          // statements; answers are graded as a set (any order).
+          html += `<div class="answer-options">`;
+          matchingList.forEach(opt => {
+            html += `<label class="answer-option"><input type="radio" name="q${q}" value="${opt.letter}"> ${opt.letter}. ${escapeHTML(opt.text)}</label>`;
+          });
+          html += `</div>`;
         } else if (isMC && mcOptions.length > 0) {
           html += `<div class="answer-options">`;
           mcOptions.forEach(opt => {
             html += `<label class="answer-option"><input type="radio" name="q${q}" value="${opt.letter}"> ${opt.letter}. ${escapeHTML(opt.text)}</label>`;
           });
           html += `</div>`;
+        } else if (isMC && noNumbered && matchingList.length > 0) {
+          // MC group whose stem + options all live in the instruction text
+          // (e.g. a single "Question 13" block with options A-D)
+          html += `<div class="answer-options">`;
+          matchingList.forEach(opt => {
+            html += `<label class="answer-option"><input type="radio" name="q${q}" value="${opt.letter}"> ${opt.letter}. ${escapeHTML(opt.text)}</label>`;
+          });
+          html += `</div>`;
+        } else if (isMultiSelect && declaredLetters.length > 0) {
+          // Options couldn't be parsed — at least offer the declared letters
+          html += ` <select class="answer-select" data-q="${q}"><option value="">Select</option>`;
+          declaredLetters.forEach(l => { html += `<option value="${l}">${l}</option>`; });
+          html += `</select>`;
         } else if (isSectionMatch || isMatching || isSentenceEnd) {
           html += ` <select class="answer-select" data-q="${q}"><option value="">Select</option>`;
-          availLetters.forEach(l => { html += `<option value="${l}">${l}</option>`; });
+          availLetters.forEach((l, li) => {
+            const entry = (matchingList.length > li && matchingList[li].letter === l) ? matchingList[li].text : '';
+            html += `<option value="${l}"${entry ? ` data-text="${escapeAttr(entry)}"` : ''}>${l}</option>`;
+          });
           html += `</select>`;
         } else {
           // Fill in blank
-          html += ` <input type="text" class="answer-input" data-q="${q}" placeholder="Your answer...">`;
+          const ph = qText ? 'Your answer...' : `Answer for (${q})...`;
+          html += ` <input type="text" class="answer-input" data-q="${q}" placeholder="${ph}">`;
         }
 
         html += `</div></div>`;
@@ -979,6 +1546,32 @@
   }
   function escapeAttr(s) {
     return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  }
+
+  // Split text like "stem A first option B second option C third option" into
+  // the stem and lettered entries, given the exact sequence of letters to look
+  // for. Returns null unless EVERY letter is found, in order — this strictness
+  // is what makes bare-letter parsing safe (the article "A" alone never has a
+  // full B…F sequence behind it).
+  function splitBareLetterSeq(text, letters) {
+    if (!text || !letters || letters.length < 2) return null;
+    const positions = [];
+    let searchFrom = 0;
+    for (const L of letters) {
+      const re = new RegExp('(?:^|[\\s,;:])' + L + '\\s+(?=\\S)', 'g');
+      re.lastIndex = searchFrom;
+      const m = re.exec(text);
+      if (!m) return null;
+      const letterPos = m.index + m[0].indexOf(L);
+      positions.push({ letterPos, textStart: m.index + m[0].length });
+      searchFrom = m.index + m[0].length;
+    }
+    const entries = positions.map((p, i) => ({
+      letter: letters[i],
+      text: text.substring(p.textStart, i + 1 < positions.length ? positions[i + 1].letterPos : text.length).trim()
+    }));
+    if (entries.some(e => !e.text)) return null;
+    return { before: text.substring(0, positions[0].letterPos).trim(), entries };
   }
 
   function buildAnswerBar(answers) {
@@ -1054,8 +1647,9 @@
     if (checkBtn) {
       checkBtn.addEventListener('click', () => {
         let correct = 0, total = 0;
+        const multiGroups = {}; // "21-22" -> [{item, expected, user}]
+
         questionsContent.querySelectorAll('.question-item[data-answer]').forEach(item => {
-          const q = item.dataset.q;
           const expected = (item.dataset.answer || '').toLowerCase().trim();
           if (!expected) return;
           total++;
@@ -1068,7 +1662,20 @@
           else if (input) userAnswer = input.value.toLowerCase().trim();
           else if (select) userAnswer = select.value.toLowerCase().trim();
 
-          const isCorrect = userAnswer === expected;
+          // "Choose TWO letters" groups are graded as a set, in any order
+          if (item.dataset.multi) {
+            const key = item.dataset.multi;
+            (multiGroups[key] = multiGroups[key] || []).push({ item, expected, user: userAnswer });
+            return;
+          }
+
+          let isCorrect = userAnswer === expected;
+          // Letter dropdowns may carry the option's full text (word lists) —
+          // accept the answer whether the key stores the letter or the word.
+          if (!isCorrect && select && select.selectedIndex > 0) {
+            const optText = (select.options[select.selectedIndex].getAttribute('data-text') || '').toLowerCase().trim();
+            if (optText && optText === expected) isCorrect = true;
+          }
           if (isCorrect) correct++;
 
           // Visual feedback
@@ -1089,6 +1696,44 @@
             if (!isCorrect) select.title = `Correct: ${item.dataset.answer}`;
           }
         });
+
+        // Grade multi-select ("Choose TWO letters") groups: each expected
+        // letter may appear in any of the group's boxes, used at most once.
+        // The answer key may store letters per box ("B" / "D") or the combined
+        // set on every box ("B, D") — normalize to one pool of unique letters.
+        Object.values(multiGroups).forEach(entries => {
+          const pool = [];
+          entries.forEach(e => {
+            const letters = e.expected.split(/[^a-j]+/i).filter(s => /^[a-k]$/i.test(s));
+            if (letters.length) {
+              letters.forEach(l => { if (!pool.includes(l)) pool.push(l); });
+            } else if (e.expected && !pool.includes(e.expected)) {
+              pool.push(e.expected);
+            }
+          });
+          const poolLabel = pool.map(l => l.toUpperCase()).join(', ');
+          entries.forEach(e => {
+            let ok = false;
+            const idx = e.user ? pool.indexOf(e.user) : -1;
+            if (idx !== -1) { ok = true; pool.splice(idx, 1); }
+            if (ok) correct++;
+
+            e.item.querySelectorAll('.answer-option').forEach(opt => {
+              const r = opt.querySelector('input[type="radio"]');
+              opt.classList.remove('correct-option', 'incorrect-option');
+              if (r && r.checked) opt.classList.add(ok ? 'correct-option' : 'incorrect-option');
+            });
+            const sel = e.item.querySelector('.answer-select');
+            if (sel) {
+              sel.style.borderColor = ok ? '#2b8a3e' : '#e03131';
+              sel.style.background = ok ? '#ebfbee' : '#fff5f5';
+            }
+            if (!ok) {
+              e.item.title = 'Correct letters (any order): ' + poolLabel;
+            }
+          });
+        });
+
         if (scoreDisplay) scoreDisplay.textContent = `Score: ${correct} / ${total}`;
       });
     }
@@ -1105,6 +1750,7 @@
         questionsContent.querySelectorAll('.answer-select').forEach(s => {
           s.value = ''; s.style.borderColor = ''; s.style.background = ''; s.title = '';
         });
+        questionsContent.querySelectorAll('.question-item').forEach(i => { i.title = ''; });
         if (scoreDisplay) scoreDisplay.textContent = '';
       });
     }
@@ -1253,6 +1899,164 @@
     output += '</div>';
 
     return output;
+  }
+
+  // ---- Parse Writing Content (interactive: prompt + answer box per task) ----
+  function parseWritingContent(html, testInfo) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    [
+      'script','style','header','footer','nav','.social-share','.post-navigation',
+      '.comments','.sidebar','ins','.adsbygoogle','.entry-meta','.post-meta',
+      '.breadcrumbs','.related-posts','.sharedaddy','.jp-relatedposts','.wpulike',
+      '.entry-footer','.author-info','.post-tags','noscript','.noprint'
+    ].forEach(sel => { try { doc.querySelectorAll(sel).forEach(el => el.remove()); } catch(e) {} });
+
+    let contentEl = doc.querySelector('.entry-content') || doc.querySelector('.post-content') ||
+                    doc.querySelector('article') || doc.querySelector('main') || doc.body;
+    if (!contentEl) return null;
+
+    let rawHTML = contentEl.innerHTML
+      .replace(/\(adsbygoogle\s*=\s*window\.adsbygoogle\s*\|\|\s*\[\]\)\.push\(\{[^}]*\}\);?/g, '')
+      .replace(/<ins[^>]*class="adsbygoogle"[^>]*>[\s\S]*?<\/ins>/gi, '')
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<p>\s*<\/p>/gi, '');
+
+    const tmp = new DOMParser().parseFromString('<div>' + rawHTML + '</div>', 'text/html');
+    const root = tmp.body.firstChild;
+
+    // Fix images (lazy-load, absolute URLs, proxy) and drop data: placeholders
+    root.querySelectorAll('img').forEach(img => {
+      const dataSrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original');
+      const curSrc = img.getAttribute('src') || '';
+      if (dataSrc && (!curSrc || curSrc.includes('data:') || curSrc.includes('placeholder'))) img.setAttribute('src', dataSrc);
+      let src = img.getAttribute('src') || '';
+      if (src.startsWith('data:')) { img.remove(); return; }
+      if (src && !src.startsWith('http')) {
+        src = 'https://practicepteonline.com' + (src.startsWith('/') ? '' : '/') + src;
+        img.setAttribute('src', src);
+      }
+      ['srcset','data-srcset','data-src','data-lazy-src','loading','crossorigin','width','height']
+        .forEach(a => img.removeAttribute(a));
+      src = img.getAttribute('src') || '';
+      if (src.startsWith('http') && !src.includes('wsrv.nl')) {
+        img.setAttribute('src', `https://wsrv.nl/?url=${encodeURIComponent(src)}`);
+      }
+    });
+
+    // Split blocks into Task 1 / Task 2 by the "Task N" marker.
+    const tasks = [[], []];
+    let cur = -1;
+    Array.from(root.children).forEach(el => {
+      const t = (el.textContent || '').trim();
+      if (/^Task\s*1\b/i.test(t)) { cur = 0; }
+      else if (/^Task\s*2\b/i.test(t)) { cur = 1; }
+      // Stop at footer/copyright noise
+      if (/Copyright\s*©|Privacy\s+Policy|Practicepteonline/i.test(t)) { cur = -1; return; }
+      if (cur < 0) return;
+      // Drop the leading "Task N:" label and the "Write at least N words" line —
+      // those are shown in our own standardised header.
+      let cleaned = el.outerHTML;
+      if (/^Task\s*[12]\b\s*:?\s*$/i.test(t)) return; // pure label block
+      // strip an inline "Task N:" prefix and the word-count boilerplate
+      const stripped = t
+        .replace(/^Task\s*[12]\b\s*:?\s*/i, '')
+        // tolerate the site's "at lease" / "at least" typo variants
+        .replace(/Write\s+at\s+le\w+\s+\d+\s+words\.?/ig, '')
+        .trim();
+      if (!stripped && !el.querySelector('img')) return; // nothing but boilerplate
+      // If the block is text-only, rebuild it without the stripped boilerplate
+      if (!el.querySelector('img')) {
+        cleaned = `<p>${escapeHTML(stripped)}</p>`;
+      } else {
+        // image block — keep images, prepend any residual text
+        const imgs = Array.from(el.querySelectorAll('img')).map(i => i.outerHTML).join('');
+        cleaned = (stripped ? `<p>${escapeHTML(stripped)}</p>` : '') +
+                  `<div class="writing-figure">${imgs}</div>`;
+      }
+      tasks[cur].push(cleaned);
+    });
+
+    // Fallback: if markers were missing, dump everything into Task 1.
+    if (tasks[0].length === 0 && tasks[1].length === 0) {
+      tasks[0].push(root.innerHTML);
+    }
+
+    return buildWritingHTML(tasks, testInfo);
+  }
+
+  function buildWritingHTML(tasks, testInfo) {
+    const tid = (testInfo && testInfo.id) || 'w';
+    const part = (n, minutes, words, blocks) => {
+      const saved = '';
+      const promptHTML = blocks.length ? blocks.join('') : '<p>(Prompt unavailable)</p>';
+      return `
+        <div class="writing-part" data-part="${n}"${n === 2 ? ' style="display:none"' : ''}>
+          <div class="writing-instruction">
+            <h3>Academic Writing Part ${n}</h3>
+            <p>You should spend about ${minutes} minutes on this task. Write at least ${words} words.</p>
+          </div>
+          <div class="writing-split">
+            <div class="writing-prompt">${promptHTML}</div>
+            <div class="writing-answer">
+              <textarea class="writing-textarea" data-test="${escapeAttr(tid)}" data-part="${n}" data-min="${words}"
+                placeholder="Type your answer here...">${saved}</textarea>
+              <div class="writing-wordcount">Word Count: <span class="wc-num">0</span>
+                <span class="wc-target"> / ${words} words</span></div>
+            </div>
+          </div>
+        </div>`;
+    };
+
+    return `
+      <div class="writing-test">
+        <div class="writing-tabs">
+          <button class="writing-tab active" data-part="1">Part 1</button>
+          <button class="writing-tab" data-part="2">Part 2</button>
+        </div>
+        ${part(1, 20, 150, tasks[0])}
+        ${part(2, 40, 250, tasks[1])}
+      </div>`;
+  }
+
+  // ---- Bind Writing Test interactivity (tabs, word count, persistence) ----
+  function bindWritingTest() {
+    const wt = testContent.querySelector('.writing-test');
+    if (!wt) return;
+
+    // Tab switching
+    wt.querySelectorAll('.writing-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const p = tab.dataset.part;
+        wt.querySelectorAll('.writing-tab').forEach(t => t.classList.toggle('active', t === tab));
+        wt.querySelectorAll('.writing-part').forEach(part => {
+          part.style.display = part.dataset.part === p ? '' : 'none';
+        });
+      });
+    });
+
+    // Word count + persistence per textarea
+    const countWords = (s) => {
+      const m = s.trim().match(/\S+/g);
+      return m ? m.length : 0;
+    };
+    wt.querySelectorAll('.writing-textarea').forEach(ta => {
+      const key = `ielts_writing_${ta.dataset.test}_p${ta.dataset.part}`;
+      const min = parseInt(ta.dataset.min);
+      const wcNum = ta.closest('.writing-answer').querySelector('.wc-num');
+      const update = () => {
+        const n = countWords(ta.value);
+        wcNum.textContent = n;
+        wcNum.classList.toggle('wc-met', n >= min);
+      };
+      // restore saved draft
+      try { const v = localStorage.getItem(key); if (v) ta.value = v; } catch(e) {}
+      update();
+      ta.addEventListener('input', () => {
+        update();
+        try { localStorage.setItem(key, ta.value); } catch(e) {}
+      });
+    });
   }
 
   // ---- Toolbar Binding ----
@@ -1571,141 +2375,138 @@
   }
 
   // ===== DRAWING CANVAS ENGINE =====
-  const drawCanvas = document.getElementById('draw-canvas');
-  const drawCtx = drawCanvas.getContext('2d');
+  // One canvas is injected INTO each scrolling pane (passage + questions) and
+  // sized to the pane's full scroll height. Because the canvas lives inside
+  // the scroll container, strokes scroll WITH the text — exactly like the
+  // highlighter — instead of floating over a fixed viewport overlay.
   const drawColorInput = document.getElementById('draw-color');
   const drawSizeSelect = document.getElementById('draw-size');
   const drawClearBtn = document.getElementById('draw-clear');
-  const mainContent = document.getElementById('main-content');
+  const legacyCanvas = document.getElementById('draw-canvas');
+  if (legacyCanvas) legacyCanvas.style.display = 'none'; // replaced by per-pane canvases
+
   let isDrawing = false;
   let drawMode = false;
   let eraserMode = false;
+  let activeCtx = null; // context of the pane currently being drawn on
 
-  function resizeCanvas() {
-    // Fixed viewport overlay — match viewport size
-    const headerH = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--header-height')) || 56;
-    const w = window.innerWidth;
-    const h = window.innerHeight - headerH;
-    // Save drawing
-    let savedData = null;
-    try {
-      if (drawCanvas.width > 0 && drawCanvas.height > 0) {
-        savedData = drawCtx.getImageData(0, 0, drawCanvas.width, drawCanvas.height);
+  function drawPanes() {
+    return Array.from(document.querySelectorAll('.split-pane-content'));
+  }
+
+  // Create or resize a canvas inside each pane, preserving any existing
+  // drawing across resizes.
+  function ensurePaneCanvases() {
+    drawPanes().forEach(pane => {
+      let canvas = pane.querySelector(':scope > canvas.pane-draw-canvas');
+      const w = pane.clientWidth;
+      const h = Math.max(pane.scrollHeight, pane.clientHeight);
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvas.className = 'pane-draw-canvas';
+        pane.appendChild(canvas);
+        bindCanvas(canvas);
       }
-    } catch(e) {}
-    drawCanvas.width = w;
-    drawCanvas.height = h;
-    // Restore
-    if (savedData) {
-      drawCtx.putImageData(savedData, 0, 0);
+      if (canvas.width !== w || canvas.height !== h) {
+        const ctx = canvas.getContext('2d');
+        let saved = null;
+        try {
+          if (canvas.width > 0 && canvas.height > 0) {
+            saved = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          }
+        } catch (e) {}
+        canvas.width = w;
+        canvas.height = h;
+        if (saved) ctx.putImageData(saved, 0, 0);
+      }
+      canvas.classList.toggle('active', drawMode && !eraserMode);
+      canvas.classList.toggle('eraser-active', drawMode && eraserMode);
+    });
+  }
+  // expose for the test-loader so canvases re-attach when content changes
+  ensureDrawCanvases = ensurePaneCanvases;
+
+  function getCanvasCoords(canvas, e) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  function strokeStyleFor(ctx) {
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const size = parseInt(drawSizeSelect.value);
+    if (eraserMode) {
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.lineWidth = size * 4;
+      ctx.strokeStyle = 'rgba(0,0,0,1)';
+    } else {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.lineWidth = size;
+      ctx.strokeStyle = drawColorInput.value;
     }
   }
-  resizeCanvas();
-  window.addEventListener('resize', resizeCanvas);
+
+  function bindCanvas(canvas) {
+    const ctx = canvas.getContext('2d');
+    const start = (clientX, clientY) => {
+      isDrawing = true;
+      activeCtx = ctx;
+      const pos = getCanvasCoords(canvas, { clientX, clientY });
+      ctx.beginPath();
+      ctx.moveTo(pos.x, pos.y);
+    };
+    const move = (clientX, clientY) => {
+      if (!isDrawing || !drawMode || activeCtx !== ctx) return;
+      const pos = getCanvasCoords(canvas, { clientX, clientY });
+      strokeStyleFor(ctx);
+      ctx.lineTo(pos.x, pos.y);
+      ctx.stroke();
+    };
+    canvas.addEventListener('mousedown', (e) => { if (drawMode) start(e.clientX, e.clientY); });
+    canvas.addEventListener('mousemove', (e) => move(e.clientX, e.clientY));
+    canvas.addEventListener('touchstart', (e) => {
+      if (!drawMode) return;
+      e.preventDefault();
+      start(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: false });
+    canvas.addEventListener('touchmove', (e) => {
+      if (!isDrawing || !drawMode) return;
+      e.preventDefault();
+      move(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: false });
+  }
+
+  // End a stroke regardless of which canvas the pointer is over.
+  ['mouseup', 'touchend'].forEach(ev =>
+    document.addEventListener(ev, () => { isDrawing = false; activeCtx = null; }));
+
+  window.addEventListener('resize', () => { if (drawMode) ensurePaneCanvases(); });
 
   function enableDrawCanvas(eraser) {
     drawMode = true;
     eraserMode = eraser;
     document.body.classList.add('draw-mode');
-    resizeCanvas(); // update size before drawing
-    if (eraser) {
-      drawCanvas.classList.remove('active');
-      drawCanvas.classList.add('eraser-active');
-    } else {
-      drawCanvas.classList.remove('eraser-active');
-      drawCanvas.classList.add('active');
-    }
+    ensurePaneCanvases();
   }
 
   function disableDrawCanvas() {
     drawMode = false;
     eraserMode = false;
     isDrawing = false;
+    activeCtx = null;
     document.body.classList.remove('draw-mode');
-    drawCanvas.classList.remove('active', 'eraser-active');
+    drawPanes().forEach(pane => {
+      const c = pane.querySelector(':scope > canvas.pane-draw-canvas');
+      if (c) c.classList.remove('active', 'eraser-active');
+    });
   }
 
-  // Get coordinates relative to the canvas
-  function getCanvasCoords(e) {
-    const rect = drawCanvas.getBoundingClientRect();
-    return {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top
-    };
-  }
-
-  // Mouse events
-  drawCanvas.addEventListener('mousedown', (e) => {
-    if (!drawMode) return;
-    isDrawing = true;
-    const pos = getCanvasCoords(e);
-    drawCtx.beginPath();
-    drawCtx.moveTo(pos.x, pos.y);
-  });
-
-  drawCanvas.addEventListener('mousemove', (e) => {
-    if (!isDrawing || !drawMode) return;
-    const pos = getCanvasCoords(e);
-
-    drawCtx.lineWidth = parseInt(drawSizeSelect.value);
-    drawCtx.lineCap = 'round';
-    drawCtx.lineJoin = 'round';
-
-    if (eraserMode) {
-      drawCtx.globalCompositeOperation = 'destination-out';
-      drawCtx.lineWidth = parseInt(drawSizeSelect.value) * 4;
-      drawCtx.strokeStyle = 'rgba(0,0,0,1)';
-    } else {
-      drawCtx.globalCompositeOperation = 'source-over';
-      drawCtx.strokeStyle = drawColorInput.value;
-    }
-
-    drawCtx.lineTo(pos.x, pos.y);
-    drawCtx.stroke();
-  });
-
-  drawCanvas.addEventListener('mouseup', () => { isDrawing = false; });
-  drawCanvas.addEventListener('mouseleave', () => { isDrawing = false; });
-
-  // Touch events
-  drawCanvas.addEventListener('touchstart', (e) => {
-    if (!drawMode) return;
-    e.preventDefault();
-    isDrawing = true;
-    const touch = e.touches[0];
-    const pos = getCanvasCoords(touch);
-    drawCtx.beginPath();
-    drawCtx.moveTo(pos.x, pos.y);
-  }, { passive: false });
-
-  drawCanvas.addEventListener('touchmove', (e) => {
-    if (!isDrawing || !drawMode) return;
-    e.preventDefault();
-    const touch = e.touches[0];
-    const pos = getCanvasCoords(touch);
-
-    drawCtx.lineWidth = parseInt(drawSizeSelect.value);
-    drawCtx.lineCap = 'round';
-    drawCtx.lineJoin = 'round';
-
-    if (eraserMode) {
-      drawCtx.globalCompositeOperation = 'destination-out';
-      drawCtx.lineWidth = parseInt(drawSizeSelect.value) * 4;
-      drawCtx.strokeStyle = 'rgba(0,0,0,1)';
-    } else {
-      drawCtx.globalCompositeOperation = 'source-over';
-      drawCtx.strokeStyle = drawColorInput.value;
-    }
-
-    drawCtx.lineTo(pos.x, pos.y);
-    drawCtx.stroke();
-  }, { passive: false });
-
-  drawCanvas.addEventListener('touchend', () => { isDrawing = false; });
-
-  // Clear drawing
+  // Clear drawing on every pane
   drawClearBtn.addEventListener('click', () => {
-    drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+    drawPanes().forEach(pane => {
+      const c = pane.querySelector(':scope > canvas.pane-draw-canvas');
+      if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
+    });
   });
 
   // Escape exits draw mode

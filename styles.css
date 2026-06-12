@@ -795,6 +795,29 @@ body {
   min-width: 18px;
 }
 
+/* Images that belong to the question side (diagrams, charts, tables-as-images) */
+.question-group-images {
+  margin: 0 0 16px 0;
+}
+.q-images {
+  margin: 8px 0 10px;
+}
+.question-group-images img,
+.q-images img,
+.question-group-instruction.embedded-notes img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  background: #fff;
+  border: 1px solid var(--border-color, #e1e4e8);
+  border-radius: var(--radius-sm);
+  margin: 8px 0;
+}
+.question-group-instruction.embedded-notes .table-wrapper {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* Original question prompts shown inline within the passage panel
    (so the user can verify questions against passage text) */
 .passage-question-block {
@@ -1060,23 +1083,149 @@ body {
 /* ============================================================
    DRAWING CANVAS OVERLAY — fixed viewport overlay
    ============================================================ */
-#draw-canvas {
-  position: fixed;
-  top: var(--header-height);
+#draw-canvas { display: none; } /* legacy fixed overlay — replaced by per-pane canvases */
+
+/* Per-pane drawing canvas: lives INSIDE each scrolling pane so strokes
+   scroll with the text (like highlights), instead of floating on a fixed
+   viewport overlay. */
+.split-pane-content { position: relative; }
+.pane-draw-canvas {
+  position: absolute;
+  top: 0;
   left: 0;
-  width: 100vw;
-  height: calc(100vh - var(--header-height));
   z-index: 10;
   pointer-events: none;
   touch-action: none;
 }
-#draw-canvas.active {
-  pointer-events: auto !important;
-  cursor: crosshair !important;
+.pane-draw-canvas.active {
+  pointer-events: auto;
+  cursor: crosshair;
 }
-#draw-canvas.eraser-active {
-  pointer-events: auto !important;
-  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='white' stroke='%23333' stroke-width='1.5'%3E%3Crect x='4' y='4' width='16' height='16' rx='3'/%3E%3C/svg%3E") 12 12, auto !important;
+.pane-draw-canvas.eraser-active {
+  pointer-events: auto;
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='white' stroke='%23333' stroke-width='1.5'%3E%3Crect x='4' y='4' width='16' height='16' rx='3'/%3E%3C/svg%3E") 12 12, auto;
+}
+
+/* ============================================================
+   INTERACTIVE WRITING TEST
+   ============================================================ */
+.writing-test { max-width: 1400px; margin: 0 auto; padding: 8px 4px 40px; }
+
+.writing-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+  border-bottom: 2px solid var(--border-color);
+  padding-bottom: 0;
+}
+.writing-tab {
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  font-weight: 700;
+  padding: 10px 22px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  margin-bottom: -2px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.writing-tab:hover { color: var(--text-primary); }
+.writing-tab.active {
+  color: var(--accent-primary);
+  border-bottom-color: var(--accent-primary);
+}
+
+.writing-instruction {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 14px 20px;
+  margin-bottom: 14px;
+}
+.writing-instruction h3 {
+  font-family: var(--font-sans);
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 6px;
+}
+.writing-instruction p {
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.writing-split {
+  display: flex;
+  gap: 18px;
+  align-items: stretch;
+  min-height: 60vh;
+}
+.writing-prompt,
+.writing-answer { flex: 1; min-width: 0; }
+
+.writing-prompt {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 22px 24px;
+  overflow-y: auto;
+  max-height: 72vh;
+  font-family: var(--font-serif);
+  font-size: 1.02rem;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+.writing-prompt p { margin: 0 0 14px; font-weight: 600; }
+.writing-prompt p:last-child { margin-bottom: 0; }
+.writing-figure { margin: 16px 0 4px; text-align: center; }
+.writing-figure img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px;
+}
+
+.writing-answer { display: flex; flex-direction: column; }
+.writing-textarea {
+  flex: 1;
+  width: 100%;
+  min-height: 60vh;
+  resize: vertical;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 16px 18px;
+  font-family: var(--font-serif);
+  font-size: 1.02rem;
+  line-height: 1.7;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  outline: none;
+  box-sizing: border-box;
+}
+.writing-textarea:focus { border-color: var(--accent-primary); }
+
+.writing-wordcount {
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  padding: 10px 4px 0;
+}
+.writing-wordcount .wc-num { color: var(--text-primary); }
+.writing-wordcount .wc-num.wc-met { color: #1a9e54; }
+.writing-wordcount .wc-target { color: var(--text-muted); font-weight: 600; }
+
+@media (max-width: 880px) {
+  .writing-split { flex-direction: column; min-height: 0; }
+  .writing-prompt { max-height: none; }
+  .writing-textarea { min-height: 40vh; }
 }
 
 /* Drawing tool inputs in toolbar */
