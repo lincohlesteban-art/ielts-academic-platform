@@ -919,7 +919,7 @@
         || /statements?\s+agree\s+with\s+the\s+(information|claims|views)/i.test(detectionText) && /\bTRUE\b/i.test(detectionText);
       const isYNNG = !isTFNG && (/\bYES\b[\s\S]{0,300}\bNO\b[\s\S]{0,300}\bNOT\s*GIVEN\b/i.test(detectionText)
         || (/claims|views|opinions/i.test(detectionText) && /\bYES\b/i.test(detectionText) && /\bNOT\s*GIVEN\b/i.test(detectionText)));
-      const isMC = /Choose\s+the\s+correct\s+letter/i.test(detectionText);
+      let isMC = /Choose\s+the\s+(?:correct|appropriate|right|best)\s+letters?\b/i.test(detectionText);
       // "Choose TWO/THREE letters, A-E" — a group answered by a set of letters
       const isMultiSelect = !isMC && /\bChoose\s+(TWO|THREE|FOUR|FIVE|SIX|SEVEN)\s+letters?\b/i.test(detectionText);
       let isMatching = /Match\s+(each|the)\b|List\s+of\s+People|list\s+of\s+(headings|theories|researchers|findings|people|names|dates|scientists|writers|experts|statements|countries)/i.test(detectionText);
@@ -1288,6 +1288,31 @@
           } else {
             break;
           }
+        }
+      }
+
+      // ---- Confirm / promote multiple-choice by CONTENT ----
+      // Source wording is inconsistent ("Choose the correct/appropriate letters
+      // A-D"), and the same "appropriate letter A-H" phrasing is used by some
+      // matching-from-list groups. The reliable signal is whether EACH question
+      // carries its own inline A…B…C(…D) option sequence. Count them and let the
+      // content decide: promote a missed MC group, demote a false positive
+      // (matching-from-list) so it keeps its shared dropdown.
+      if (!isMultiSelect && !isTFNG && !isYNNG && !isSectionMatch && !isSentenceEnd) {
+        let qWithOwnOptions = 0, qTotal = 0;
+        for (let q = grp.start; q <= grp.end; q++) {
+          if (!qTexts[q]) continue;
+          qTotal++;
+          if (splitBareLetterSeq(qTexts[q], ['A', 'B', 'C'])) qWithOwnOptions++;
+        }
+        const mostHaveOwnOptions = qTotal > 0 && qWithOwnOptions >= Math.ceil(qTotal / 2);
+        if (mostHaveOwnOptions && !isMatching) {
+          isMC = true;                 // each question has its own options → MC
+        } else if (isMC && qWithOwnOptions === 0 && !noNumbered) {
+          isMC = false;                // wording said MC but no inline options on
+                                       // any numbered question → it's matching-
+                                       // from-list; restore dropdown. (noNumbered
+                                       // MC keeps its options in the instruction.)
         }
       }
 
