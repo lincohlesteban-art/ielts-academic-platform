@@ -2112,37 +2112,55 @@
       }
     });
 
-    // Split blocks into Task 1 / Task 2 by the "Task N" marker.
+    // Flatten into segments before splitting. Some tests glue BOTH tasks (and
+    // the Task-1 chart) into ONE <p> separated by <br> — e.g. "Task 1: …<br>
+    // <img><br>Task 2: …" (test 107) or "<img><br>Task 2: …" (test 102). If we
+    // assigned by whole block, the second task's text and/or the chart would
+    // land in the wrong task. Split every block on <br> so each part is judged
+    // on its own.
+    const segments = [];
+    Array.from(root.children).forEach(el => {
+      const html = el.innerHTML || '';
+      if (/<br\s*\/?>/i.test(html)) {
+        html.split(/<br\s*\/?>/i).forEach(part => {
+          const d = tmp.createElement('div');
+          d.innerHTML = part;
+          if ((d.textContent || '').trim() || d.querySelector('img,table')) segments.push(d);
+        });
+      } else {
+        segments.push(el);
+      }
+    });
+
+    // Split segments into Task 1 / Task 2. Markers appear as "Task N", but the
+    // source also uses the typos "Test N" and occasionally "Part N".
     const tasks = [[], []];
     let cur = -1;
-    Array.from(root.children).forEach(el => {
+    segments.forEach(el => {
       const t = (el.textContent || '').trim();
-      if (/^Task\s*1\b/i.test(t)) { cur = 0; }
-      else if (/^Task\s*2\b/i.test(t)) { cur = 1; }
+      if (/^(?:Task|Test|Part)\s*1\b/i.test(t)) cur = 0;
+      else if (/^(?:Task|Test|Part)\s*2\b/i.test(t)) cur = 1;
       // Stop at footer/copyright noise
       if (/Copyright\s*©|Privacy\s+Policy|Practicepteonline/i.test(t)) { cur = -1; return; }
-      if (cur < 0) return;
-      // Drop the leading "Task N:" label and the "Write at least N words" line —
-      // those are shown in our own standardised header.
-      let cleaned = el.outerHTML;
-      if (/^Task\s*[12]\b\s*:?\s*$/i.test(t)) return; // pure label block
-      // strip an inline "Task N:" prefix and the word-count boilerplate
-      const stripped = t
-        .replace(/^Task\s*[12]\b\s*:?\s*/i, '')
-        // tolerate the site's "at lease" / "at least" typo variants
-        .replace(/Write\s+at\s+le\w+\s+\d+\s+words\.?/ig, '')
-        .trim();
-      if (!stripped && !el.querySelector('img')) return; // nothing but boilerplate
-      // If the block is text-only, rebuild it without the stripped boilerplate
-      if (!el.querySelector('img')) {
-        cleaned = `<p>${escapeHTML(stripped)}</p>`;
-      } else {
-        // image block — keep images, prepend any residual text
-        const imgs = Array.from(el.querySelectorAll('img')).map(i => i.outerHTML).join('');
-        cleaned = (stripped ? `<p>${escapeHTML(stripped)}</p>` : '') +
-                  `<div class="writing-figure">${imgs}</div>`;
+
+      // In Academic IELTS the chart/table is ALWAYS a Task-1 visual — Task 2 is
+      // pure essay text. So route every image/table to Task 1 no matter which
+      // block it was glued into (fixes the chart appearing under Task 2).
+      const imgs = Array.from(el.querySelectorAll('img')).map(i => i.outerHTML);
+      const tables = Array.from(el.querySelectorAll('table')).map(tb => tb.outerHTML);
+      if (imgs.length || tables.length) {
+        tasks[0].push(`<div class="writing-figure">${imgs.join('')}${tables.join('')}</div>`);
       }
-      tasks[cur].push(cleaned);
+
+      if (cur < 0) return;
+      // Drop the leading "Task/Test N:" label and the "Write at least N words"
+      // boilerplate — both are shown in our own standardised header.
+      const stripped = t
+        .replace(/^(?:Task|Test|Part)\s*[12]\b\s*:?\s*/i, '')
+        .replace(/Write\s+at\s+le\w+\s+\d+\s+words\.?/ig, '')
+        .replace(/Write\s+a\s+report\s+for\s+a\s+university\s+lecturer[^.]*\./ig, '')
+        .trim();
+      if (stripped) tasks[cur].push(`<p>${escapeHTML(stripped)}</p>`);
     });
 
     // Fallback: if markers were missing, dump everything into Task 1.
