@@ -2140,9 +2140,6 @@
     if (!contentEl) contentEl = doc.body;
     if (!contentEl) return '<p>Could not parse test content.</p>';
 
-    // Official answers (listening tests carry the same "Show Answers" box).
-    const listeningAnswers = (type === 'listening') ? extractOfficialAnswers(contentEl, doc) : {};
-
     let rawHTML = contentEl.innerHTML;
 
     // Clean up ad-related scripts and insertions
@@ -2195,15 +2192,24 @@
     });
     tempRoot.querySelectorAll('a[href*=".mp3"]').forEach(a => a.remove());
 
-    // For listening: remove the source's own "Show Answers" box, its toggle
-    // button, and the non-functional inline inputs/checkboxes. The official
-    // answers are shown through our own Answer Sheet (built below), which is the
-    // single gradable surface — inline inputs can't be mapped to question numbers
-    // reliably across every form/table/map layout.
+    // For listening: keep the original test layout (inline blanks) exactly as is.
+    // Only replace the source's broken "Show Answers" plugin button with a working
+    // "Check Answers" toggle that reveals the official answer key (hidden by
+    // default) at the end of the test.
     if (type === 'listening') {
-      tempRoot.querySelectorAll('[id^="bg-showmore-hidden"], [id^="bg-showmore-action"], .bg-showmore-plg-button')
+      tempRoot.querySelectorAll('.bg-showmore-plg-button, [id^="bg-showmore-action"], input[id^="bg-show-"]')
         .forEach(el => el.remove());
-      tempRoot.querySelectorAll('input, [id^="bg-show-"]').forEach(el => el.remove());
+      const ansBox = tempRoot.querySelector('[id^="bg-showmore-hidden"]');
+      if (ansBox) {
+        ansBox.id = 'listening-answer-key';
+        ansBox.className = (ansBox.className + ' listening-answer-key').trim();
+        const btn = tempDoc.createElement('button');
+        btn.type = 'button';
+        btn.id = 'btn-listening-check';
+        btn.className = 'btn-check-answers listening-check-btn';
+        btn.textContent = 'Check Answers';
+        ansBox.parentNode.insertBefore(btn, ansBox);
+      }
     }
 
     // Wrap tables in responsive wrappers
@@ -2243,98 +2249,19 @@
     output += rawHTML;
     output += '</div>';
 
-    // Listening Answer Sheet: a numbered 1–N grid the user fills while listening,
-    // then Check / Show against the official key.
-    if (type === 'listening' && Object.keys(listeningAnswers).length > 0) {
-      output += buildListeningAnswerSheet(listeningAnswers);
-    }
-
     return output;
   }
 
-  // Build the numbered answer sheet + Check/Show/Reset bar for a listening test.
-  function buildListeningAnswerSheet(answers) {
-    const nums = Object.keys(answers).map(Number).sort((a, b) => a - b);
-    const maxN = nums.length ? nums[nums.length - 1] : 0;
-    let cells = '';
-    for (let q = 1; q <= maxN; q++) {
-      const a = answers[q] || '';
-      cells += `
-        <div class="as-cell">
-          <span class="as-num">${q}</span>
-          <input class="as-input" type="text" data-q="${q}" data-answer="${escapeAttr(a)}"
-                 autocomplete="off" spellcheck="false" placeholder="…">
-          <span class="as-answer"></span>
-        </div>`;
-    }
-    return `
-      <div class="listening-answersheet" id="listening-answersheet">
-        <div class="as-header">
-          <h3>Answer Sheet</h3>
-          <p>Type your answers, then check them against the official key.</p>
-        </div>
-        <div class="as-grid">${cells}</div>
-        <div class="check-answers-bar">
-          <button class="btn-check-answers" id="btn-check-answers">Check Answers</button>
-          <button class="btn-show-answers" id="btn-show-answers">Show Answers</button>
-          <button class="btn-reset-answers" id="btn-reset-answers">Reset</button>
-          <span class="score-display" id="score-display"></span>
-        </div>
-      </div>`;
-  }
-
-  // Grade / reveal the listening Answer Sheet (all text inputs, keyed by number).
+  // Listening: the official answer key sits at the end of the test, hidden until
+  // the "Check Answers" button (which replaced the source's dead plugin toggle).
   function bindListeningAnswers() {
-    const sheet = document.getElementById('listening-answersheet');
-    if (!sheet) return;
-    const checkBtn = sheet.querySelector('#btn-check-answers');
-    const showBtn = sheet.querySelector('#btn-show-answers');
-    const resetBtn = sheet.querySelector('#btn-reset-answers');
-    const scoreDisplay = sheet.querySelector('#score-display');
-    const cells = () => Array.from(sheet.querySelectorAll('.as-cell'));
-
-    if (checkBtn) {
-      checkBtn.addEventListener('click', () => {
-        let correct = 0, total = 0;
-        cells().forEach(cell => {
-          const input = cell.querySelector('.as-input');
-          const official = input.dataset.answer || '';
-          if (!official) return;
-          total++;
-          const ok = answerMatches(input.value, official);
-          if (ok) correct++;
-          cell.classList.remove('as-correct', 'as-incorrect');
-          if (input.value.trim()) cell.classList.add(ok ? 'as-correct' : 'as-incorrect');
-          else cell.classList.add('as-incorrect');
-        });
-        if (scoreDisplay) scoreDisplay.textContent = `Score: ${correct} / ${total}`;
-      });
-    }
-
-    if (showBtn) {
-      showBtn.addEventListener('click', () => {
-        const showing = showBtn.classList.toggle('active');
-        showBtn.textContent = showing ? 'Hide Answers' : 'Show Answers';
-        cells().forEach(cell => {
-          const rev = cell.querySelector('.as-answer');
-          const official = cell.querySelector('.as-input').dataset.answer || '';
-          rev.textContent = showing ? official : '';
-          cell.classList.toggle('as-revealed', showing && !!official);
-        });
-      });
-    }
-
-    if (resetBtn) {
-      resetBtn.addEventListener('click', () => {
-        cells().forEach(cell => {
-          cell.classList.remove('as-correct', 'as-incorrect', 'as-revealed');
-          const input = cell.querySelector('.as-input'); input.value = '';
-          cell.querySelector('.as-answer').textContent = '';
-        });
-        if (showBtn) { showBtn.classList.remove('active'); showBtn.textContent = 'Show Answers'; }
-        if (scoreDisplay) scoreDisplay.textContent = '';
-      });
-    }
+    const btn = document.getElementById('btn-listening-check');
+    const key = document.getElementById('listening-answer-key');
+    if (!btn || !key) return;
+    btn.addEventListener('click', () => {
+      const showing = key.classList.toggle('visible');
+      btn.textContent = showing ? 'Hide Answers' : 'Check Answers';
+    });
   }
 
   // ---- Parse Writing Content (interactive: prompt + answer box per task) ----
