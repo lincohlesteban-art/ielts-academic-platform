@@ -1065,6 +1065,93 @@ body {
   color: var(--accent-primary);
 }
 
+/* ---- Listening Answer Sheet ---- */
+.listening-answersheet {
+  margin: 24px 0 8px;
+  padding: 18px 20px 4px;
+  background: var(--bg-secondary, #f7f8fb);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md, 12px);
+}
+.listening-answersheet .as-header h3 {
+  margin: 0 0 2px;
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+.listening-answersheet .as-header p {
+  margin: 0 0 14px;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.as-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px 14px;
+  margin-bottom: 14px;
+}
+.as-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid transparent;
+}
+.as-num {
+  flex: 0 0 auto;
+  min-width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-primary);
+  color: #fff;
+  border-radius: 50%;
+  font-family: var(--font-sans);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+.as-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  border: 2px solid #d0d0d8;
+  border-radius: 5px;
+  padding: 0 8px;
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  background: #fff;
+  outline: none;
+}
+.as-input:focus {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px var(--accent-light);
+}
+.as-answer {
+  flex: 1 1 100%;
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #1f6b30;
+}
+.as-answer:empty { display: none; }
+.as-cell.as-correct { background: #ebfbee; border-color: #2b8a3e; }
+.as-cell.as-correct .as-input { border-color: #2b8a3e; }
+.as-cell.as-incorrect { background: #fff5f5; border-color: #e03131; }
+.as-cell.as-incorrect .as-input { border-color: #e03131; }
+.as-cell.as-revealed { background: #ebfbee; }
+.listening-answersheet .check-answers-bar {
+  position: static;
+  padding: 12px 0 6px;
+  background: none;
+  backdrop-filter: none;
+  border-top: 1px solid var(--border-color);
+}
+
 /* ============================================================
    HIGHLIGHTING & MARKING
    ============================================================ */

@@ -360,6 +360,7 @@
         testBody.style.display = 'block';
         testSplit.style.display = 'none';
         testContainer.classList.remove('split-active');
+        if (type === 'listening') bindListeningAnswers();
       }
       document.getElementById('main-content').scrollTop = 0;
     } else {
@@ -398,64 +399,9 @@
                     doc.querySelector('article') || doc.querySelector('main') || doc.body;
     if (!contentEl) return { passage: '<p>Could not parse.</p>', questions: '' };
 
-    // Extract the OFFICIAL answers FIRST, before any section is removed. Every
-    // test ends with a "Show Answers" box (`div[id^=bg-showmore-hidden]`) that
-    // holds the answer key in one of three layouts:
-    //   (a) <br>-separated "N. value" lines   (most tests)
-    //   (b) <ol><li>value</li></ol>           (numbered by position, no "N.")
-    //   (c) <span>N. value</span><br>          (wrapped, still <br>-separated)
-    // Parsing the DOM (not glued textContent) keeps digit answers intact
-    // ("2 to 5", "7,000", "Apollo (space) programme").
-    let answersData = {};
-    const answerBox = contentEl.querySelector('[id^="bg-showmore-hidden"]');
-    if (answerBox) {
-      const liNodes = answerBox.querySelectorAll('li');
-      let lines;
-      if (liNodes.length >= 20) {
-        lines = Array.from(liNodes).map(li => (li.textContent || '').replace(/\s+/g, ' ').trim());
-      } else {
-        lines = answerBox.innerHTML.split(/<br\s*\/?>/i).map(seg => {
-          const d = doc.createElement('div'); d.innerHTML = seg;
-          return (d.textContent || '').replace(/\s+/g, ' ').trim();
-        });
-      }
-      lines = lines.filter(Boolean);
-      let numbered = 0;
-      const positional = [];
-      lines.forEach(line => {
-        const m = line.match(/^(\d{1,2})\s*[\.\)]\s*(.+)$/);
-        if (m) {
-          const n = parseInt(m[1]);
-          if (n >= 1 && n <= 40) { answersData[n] = m[2].trim(); numbered++; }
-        } else {
-          positional.push(line);
-        }
-      });
-      // Layout (b): no "N." prefixes — assign the plain values by position.
-      if (numbered === 0 && positional.length >= 20) {
-        positional.forEach((v, i) => { if (i < 40) answersData[i + 1] = v; });
-      }
-    }
-    // Fallback: older/rare pages without the box — anchor on the text marker.
-    if (Object.keys(answersData).length === 0) {
-      const fullText = contentEl.textContent || '';
-      let answerStart = fullText.search(/\b(?:Show\s+)?Answers?(?:\s+Key)?\s*:?\s*(?=1\s*[\.\)])/i);
-      if (answerStart < 0) {
-        answerStart = fullText.search(/\n\s*1\.\s*(?:True|False|Not\s*Given|Yes|No)\b/i);
-      }
-      if (answerStart > 0) {
-        let answerSection = fullText.substring(answerStart)
-          .replace(/^\s*(?:Show\s+)?Answers?(?:\s+Key)?\s*:?\s*/i, '');
-        const answerRegex = /\b(\d{1,2})\s*[\.\)]\s*([^\d][^\d\n]*?)(?=\s*\d{1,2}\s*[\.\)]|$)/g;
-        let am;
-        while ((am = answerRegex.exec(answerSection)) !== null) {
-          const qNum = parseInt(am[1]);
-          const val = am[2].trim();
-          if (val.length > 40) break;
-          if (qNum >= 1 && qNum <= 40) answersData[qNum] = val;
-        }
-      }
-    }
+    // Extract the OFFICIAL answers FIRST, before any section is removed, from the
+    // page's "Show Answers" box. (See extractOfficialAnswers for the layouts.)
+    const answersData = extractOfficialAnswers(contentEl, doc);
 
     // Now work with the HTML to separate passages from questions
     let rawHTML = contentEl.innerHTML;
@@ -1898,6 +1844,64 @@
     return acceptableAnswers(official).includes(u);
   }
 
+  // Read the OFFICIAL answers from a page's "Show Answers" box
+  // (`div[id^=bg-showmore-hidden]`), which every reading AND listening test
+  // carries at the end. Handles the three source layouts:
+  //   (a) <br>-separated "N. value" lines
+  //   (b) <ol><li>value</li></ol> numbered by position
+  //   (c) <span>N. value</span><br>
+  // Falls back to a text-anchor scan if the box is missing. Needs `doc` only to
+  // create a scratch element for <br>-splitting.
+  function extractOfficialAnswers(container, doc) {
+    const answers = {};
+    if (!container) return answers;
+    const box = container.querySelector('[id^="bg-showmore-hidden"]');
+    if (box) {
+      const liNodes = box.querySelectorAll('li');
+      if (liNodes.length >= 20) {
+        // Ordered/unordered list — one <li> per answer, numbered by POSITION.
+        // Strip a leading "N." ONLY when it equals the position, so a value like
+        // "2.30/ two-thirty" at position 8 isn't mistaken for "question 2".
+        Array.from(liNodes).forEach((li, i) => {
+          if (i >= 40) return;
+          let v = (li.textContent || '').replace(/\s+/g, ' ').trim();
+          const pos = i + 1;
+          const pm = v.match(/^(\d{1,2})\s*[\.\)]\s*(.+)$/);
+          if (pm && parseInt(pm[1]) === pos) v = pm[2].trim();
+          if (v) answers[pos] = v;
+        });
+      } else {
+        // <br>-separated "N. value" lines (values keep their own digits intact).
+        box.innerHTML.split(/<br\s*\/?>/i).forEach(seg => {
+          const d = doc.createElement('div'); d.innerHTML = seg;
+          const line = (d.textContent || '').replace(/\s+/g, ' ').trim();
+          const m = line.match(/^(\d{1,2})\s*[\.\)]\s*(.+)$/);
+          if (m) { const n = parseInt(m[1]); if (n >= 1 && n <= 40) answers[n] = m[2].trim(); }
+        });
+      }
+    }
+    if (Object.keys(answers).length === 0) {
+      const fullText = container.textContent || '';
+      let answerStart = fullText.search(/\b(?:Show\s+)?Answers?(?:\s+Key)?\s*:?\s*(?=1\s*[\.\)])/i);
+      if (answerStart < 0) {
+        answerStart = fullText.search(/\n\s*1\.\s*(?:True|False|Not\s*Given|Yes|No)\b/i);
+      }
+      if (answerStart > 0) {
+        const answerSection = fullText.substring(answerStart)
+          .replace(/^\s*(?:Show\s+)?Answers?(?:\s+Key)?\s*:?\s*/i, '');
+        const answerRegex = /\b(\d{1,2})\s*[\.\)]\s*([^\d][^\d\n]*?)(?=\s*\d{1,2}\s*[\.\)]|$)/g;
+        let am;
+        while ((am = answerRegex.exec(answerSection)) !== null) {
+          const qNum = parseInt(am[1]);
+          const val = am[2].trim();
+          if (val.length > 40) break;
+          if (qNum >= 1 && qNum <= 40) answers[qNum] = val;
+        }
+      }
+    }
+    return answers;
+  }
+
   // ---- Bind Answer Checking ----
   function bindAnswerChecking() {
     // Radio option selection styling
@@ -2136,6 +2140,9 @@
     if (!contentEl) contentEl = doc.body;
     if (!contentEl) return '<p>Could not parse test content.</p>';
 
+    // Official answers (listening tests carry the same "Show Answers" box).
+    const listeningAnswers = (type === 'listening') ? extractOfficialAnswers(contentEl, doc) : {};
+
     let rawHTML = contentEl.innerHTML;
 
     // Clean up ad-related scripts and insertions
@@ -2188,6 +2195,17 @@
     });
     tempRoot.querySelectorAll('a[href*=".mp3"]').forEach(a => a.remove());
 
+    // For listening: remove the source's own "Show Answers" box, its toggle
+    // button, and the non-functional inline inputs/checkboxes. The official
+    // answers are shown through our own Answer Sheet (built below), which is the
+    // single gradable surface — inline inputs can't be mapped to question numbers
+    // reliably across every form/table/map layout.
+    if (type === 'listening') {
+      tempRoot.querySelectorAll('[id^="bg-showmore-hidden"], [id^="bg-showmore-action"], .bg-showmore-plg-button')
+        .forEach(el => el.remove());
+      tempRoot.querySelectorAll('input, [id^="bg-show-"]').forEach(el => el.remove());
+    }
+
     // Wrap tables in responsive wrappers
     tempRoot.querySelectorAll('table').forEach(table => {
       const wrapper = tempDoc.createElement('div');
@@ -2225,7 +2243,98 @@
     output += rawHTML;
     output += '</div>';
 
+    // Listening Answer Sheet: a numbered 1–N grid the user fills while listening,
+    // then Check / Show against the official key.
+    if (type === 'listening' && Object.keys(listeningAnswers).length > 0) {
+      output += buildListeningAnswerSheet(listeningAnswers);
+    }
+
     return output;
+  }
+
+  // Build the numbered answer sheet + Check/Show/Reset bar for a listening test.
+  function buildListeningAnswerSheet(answers) {
+    const nums = Object.keys(answers).map(Number).sort((a, b) => a - b);
+    const maxN = nums.length ? nums[nums.length - 1] : 0;
+    let cells = '';
+    for (let q = 1; q <= maxN; q++) {
+      const a = answers[q] || '';
+      cells += `
+        <div class="as-cell">
+          <span class="as-num">${q}</span>
+          <input class="as-input" type="text" data-q="${q}" data-answer="${escapeAttr(a)}"
+                 autocomplete="off" spellcheck="false" placeholder="…">
+          <span class="as-answer"></span>
+        </div>`;
+    }
+    return `
+      <div class="listening-answersheet" id="listening-answersheet">
+        <div class="as-header">
+          <h3>Answer Sheet</h3>
+          <p>Type your answers, then check them against the official key.</p>
+        </div>
+        <div class="as-grid">${cells}</div>
+        <div class="check-answers-bar">
+          <button class="btn-check-answers" id="btn-check-answers">Check Answers</button>
+          <button class="btn-show-answers" id="btn-show-answers">Show Answers</button>
+          <button class="btn-reset-answers" id="btn-reset-answers">Reset</button>
+          <span class="score-display" id="score-display"></span>
+        </div>
+      </div>`;
+  }
+
+  // Grade / reveal the listening Answer Sheet (all text inputs, keyed by number).
+  function bindListeningAnswers() {
+    const sheet = document.getElementById('listening-answersheet');
+    if (!sheet) return;
+    const checkBtn = sheet.querySelector('#btn-check-answers');
+    const showBtn = sheet.querySelector('#btn-show-answers');
+    const resetBtn = sheet.querySelector('#btn-reset-answers');
+    const scoreDisplay = sheet.querySelector('#score-display');
+    const cells = () => Array.from(sheet.querySelectorAll('.as-cell'));
+
+    if (checkBtn) {
+      checkBtn.addEventListener('click', () => {
+        let correct = 0, total = 0;
+        cells().forEach(cell => {
+          const input = cell.querySelector('.as-input');
+          const official = input.dataset.answer || '';
+          if (!official) return;
+          total++;
+          const ok = answerMatches(input.value, official);
+          if (ok) correct++;
+          cell.classList.remove('as-correct', 'as-incorrect');
+          if (input.value.trim()) cell.classList.add(ok ? 'as-correct' : 'as-incorrect');
+          else cell.classList.add('as-incorrect');
+        });
+        if (scoreDisplay) scoreDisplay.textContent = `Score: ${correct} / ${total}`;
+      });
+    }
+
+    if (showBtn) {
+      showBtn.addEventListener('click', () => {
+        const showing = showBtn.classList.toggle('active');
+        showBtn.textContent = showing ? 'Hide Answers' : 'Show Answers';
+        cells().forEach(cell => {
+          const rev = cell.querySelector('.as-answer');
+          const official = cell.querySelector('.as-input').dataset.answer || '';
+          rev.textContent = showing ? official : '';
+          cell.classList.toggle('as-revealed', showing && !!official);
+        });
+      });
+    }
+
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        cells().forEach(cell => {
+          cell.classList.remove('as-correct', 'as-incorrect', 'as-revealed');
+          const input = cell.querySelector('.as-input'); input.value = '';
+          cell.querySelector('.as-answer').textContent = '';
+        });
+        if (showBtn) { showBtn.classList.remove('active'); showBtn.textContent = 'Show Answers'; }
+        if (scoreDisplay) scoreDisplay.textContent = '';
+      });
+    }
   }
 
   // ---- Parse Writing Content (interactive: prompt + answer box per task) ----
