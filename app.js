@@ -1963,23 +1963,26 @@
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
 
-    // Extract audio URLs from the page BEFORE removing elements
-    let audioUrls = [];
-    // Find direct .mp3 links
-    doc.querySelectorAll('a[href*=".mp3"]').forEach(a => {
-      audioUrls.push(a.href);
-    });
-    // Find audio source elements
-    doc.querySelectorAll('audio source, audio[src]').forEach(el => {
-      const src = el.getAttribute('src') || el.src;
-      if (src) audioUrls.push(src);
-    });
-    // Find links to audio in text
-    const mp3Match = html.match(/https?:\/\/[^\s"'<>]+\.mp3/gi);
-    if (mp3Match) {
-      mp3Match.forEach(u => {
-        if (!audioUrls.includes(u)) audioUrls.push(u);
-      });
+    // Extract the listening audio URL from the source's OWN <audio>/<source>/<a>.
+    // The site's embedded player is the source of truth (data.js filenames are
+    // sometimes wrong, e.g. "_deep"/"test-N" instead of "_we"). Use getAttribute
+    // (raw): the parsed doc has no base URL, so .src/.href would wrongly resolve
+    // relative paths against OUR origin (github.io) and 404.
+    function normalizeAudioUrl(u) {
+      if (!u) return null;
+      u = u.trim().replace(/^https?:\/\/[^/]*practicepteonline\.com/i, '');
+      u = u.replace(/\?.*$/, '');                 // drop cache-buster like ?_=1
+      if (!/^https?:\/\//i.test(u)) {
+        if (!u.startsWith('/')) u = '/' + u;
+        u = 'https://practicepteonline.com' + u;
+      }
+      u = u.replace(/([^:])\/{2,}/g, '$1/');        // collapse // (keep the scheme's)
+      return /\.mp3$/i.test(u) ? u : null;
+    }
+    let audioSrc = null;
+    for (const el of doc.querySelectorAll('audio[src], audio source[src], a[href*=".mp3"]')) {
+      const norm = normalizeAudioUrl(el.getAttribute('src') || el.getAttribute('href'));
+      if (norm) { audioSrc = norm; break; }
     }
 
     // Remove unwanted elements
@@ -2020,14 +2023,6 @@
     rawHTML = rawHTML.replace(/Share this:[\s\S]*?<\/div>/gi, '');
     rawHTML = rawHTML.replace(/Like this:[\s\S]*?<\/div>/gi, '');
 
-    // For listening tests, convert any bare .mp3 links in content to audio players
-    if (type === 'listening') {
-      rawHTML = rawHTML.replace(
-        /<a[^>]*href="([^"]*\.mp3)"[^>]*>[^<]*<\/a>/gi,
-        ''
-      );
-    }
-
     // --- Fix images: lazy-loading, relative URLs, proxy through wsrv.nl ---
     const tempDoc = new DOMParser().parseFromString('<div>' + rawHTML + '</div>', 'text/html');
     const tempRoot = tempDoc.body.firstChild;
@@ -2061,6 +2056,14 @@
       }
     });
 
+    // Remove the source's embedded audio player(s) and bare .mp3 links — we
+    // inject our own single player below, so keeping these duplicates the audio.
+    tempRoot.querySelectorAll('audio').forEach(a => {
+      const wrap = a.closest('figure, .wp-block-audio');
+      (wrap || a).remove();
+    });
+    tempRoot.querySelectorAll('a[href*=".mp3"]').forEach(a => a.remove());
+
     // Wrap tables in responsive wrappers
     tempRoot.querySelectorAll('table').forEach(table => {
       const wrapper = tempDoc.createElement('div');
@@ -2073,14 +2076,12 @@
 
     let output = '';
 
-    // Inject audio player for listening tests
+    // Inject a single audio player for listening tests.
     if (type === 'listening') {
-      // Build audio URL - prefer from data, fallback to extracted
-      let audioSrc = null;
-      if (testInfo && testInfo.audio) {
+      // Prefer the source's own embedded audio URL (extracted above); only fall
+      // back to the data.js filename when the page had no audio element.
+      if (!audioSrc && testInfo && testInfo.audio) {
         audioSrc = `https://practicepteonline.com/wp-content/uploads/audio/${testInfo.audio}.mp3`;
-      } else if (audioUrls.length > 0) {
-        audioSrc = audioUrls[0];
       }
 
       if (audioSrc) {
