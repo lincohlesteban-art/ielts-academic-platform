@@ -287,7 +287,7 @@
       const localPath = localContentPath(url);
       if (localPath) {
         try {
-          const r = await fetch(localPath, { cache: 'force-cache' });
+          const r = await fetch(localPath);
           if (r.ok) {
             const text = await r.text();
             if (text && text.length > 250) html = text;
