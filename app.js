@@ -15,6 +15,16 @@
   let currentTestId = null;
   let activeFilter = 'all';
 
+  // In-memory cache of fetched test HTML (keyed by source URL) so re-opening a
+  // test in the same session is instant — no network at all.
+  const contentCache = new Map();
+  // Derive the local pre-bundled content path from a source URL:
+  // https://practicepteonline.com/ielts-reading-test-27/ -> content/ielts-reading-test-27.html
+  function localContentPath(url) {
+    const slug = String(url).replace(/[\/#?]+$/, '').split('/').pop();
+    return slug ? `content/${slug}.html` : null;
+  }
+
   // ---- DOM References ----
   const sidebar = document.getElementById('sidebar');
   const sidebarToggle = document.getElementById('sidebar-toggle');
@@ -262,29 +272,53 @@
     currentTestId = testInfo.id;
     localStorage.setItem('ielts_last_test', `${bookNum}|${type}|${testIdx}|${url}`);
 
-    // Fetch content using CORS proxies with fallback
-    const proxies = [
-      (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-      (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-      (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-      (u) => `https://thingproxy.freeboard.io/fetch/${u}`
-    ];
-
     let html = null;
     let lastError = null;
 
-    for (const makeProxy of proxies) {
-      try {
-        const proxyUrl = makeProxy(url);
-        const response = await fetch(proxyUrl, { signal: AbortSignal.timeout(12000) });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        html = await response.text();
-        if (html && html.length > 500) break;
-      } catch (err) {
-        lastError = err;
-        html = null;
+    // 1) In-memory cache — instant on repeat opens within a session.
+    if (contentCache.has(url)) {
+      html = contentCache.get(url);
+    }
+
+    // 2) Local pre-bundled content — served by the CDN/host, fast and with no
+    //    per-user rate limit, so many people can use the app at once. Falls back
+    //    to the live proxies below only when a test hasn't been bundled.
+    if (!html) {
+      const localPath = localContentPath(url);
+      if (localPath) {
+        try {
+          const r = await fetch(localPath, { cache: 'force-cache' });
+          if (r.ok) {
+            const text = await r.text();
+            if (text && text.length > 250) html = text;
+          }
+        } catch (err) { /* not bundled — fall through to proxies */ }
       }
     }
+
+    // 3) Live fetch via CORS proxies (fallback for un-bundled tests).
+    if (!html) {
+      const proxies = [
+        (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+        (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+        (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+        (u) => `https://thingproxy.freeboard.io/fetch/${u}`
+      ];
+      for (const makeProxy of proxies) {
+        try {
+          const proxyUrl = makeProxy(url);
+          const response = await fetch(proxyUrl, { signal: AbortSignal.timeout(12000) });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          html = await response.text();
+          if (html && html.length > 500) break;
+        } catch (err) {
+          lastError = err;
+          html = null;
+        }
+      }
+    }
+
+    if (html) contentCache.set(url, html);
 
     if (html) {
       if (type === 'reading') {
