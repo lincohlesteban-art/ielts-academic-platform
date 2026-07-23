@@ -398,29 +398,62 @@
                     doc.querySelector('article') || doc.querySelector('main') || doc.body;
     if (!contentEl) return { passage: '<p>Could not parse.</p>', questions: '' };
 
-    // Extract answers FIRST from the full text before removing the section.
-    // Anchor on the "Show Answers" / "Answer Key" / "Answers:" marker that
-    // practicepteonline.com puts at the end of every test, then read the
-    // numbered list that follows. Falls back to "1. True/False/..." anchor
-    // for older tests that don't have the marker.
+    // Extract the OFFICIAL answers FIRST, before any section is removed. Every
+    // test ends with a "Show Answers" box (`div[id^=bg-showmore-hidden]`) that
+    // holds the answer key in one of three layouts:
+    //   (a) <br>-separated "N. value" lines   (most tests)
+    //   (b) <ol><li>value</li></ol>           (numbered by position, no "N.")
+    //   (c) <span>N. value</span><br>          (wrapped, still <br>-separated)
+    // Parsing the DOM (not glued textContent) keeps digit answers intact
+    // ("2 to 5", "7,000", "Apollo (space) programme").
     let answersData = {};
-    const fullText = contentEl.textContent || '';
-    let answerStart = fullText.search(/\b(?:Show\s+)?Answers?(?:\s+Key)?\s*:?\s*(?=1\s*[\.\)])/i);
-    if (answerStart < 0) {
-      answerStart = fullText.search(/\n\s*1\.\s*(?:True|False|Not\s*Given|Yes|No)\b/i);
+    const answerBox = contentEl.querySelector('[id^="bg-showmore-hidden"]');
+    if (answerBox) {
+      const liNodes = answerBox.querySelectorAll('li');
+      let lines;
+      if (liNodes.length >= 20) {
+        lines = Array.from(liNodes).map(li => (li.textContent || '').replace(/\s+/g, ' ').trim());
+      } else {
+        lines = answerBox.innerHTML.split(/<br\s*\/?>/i).map(seg => {
+          const d = doc.createElement('div'); d.innerHTML = seg;
+          return (d.textContent || '').replace(/\s+/g, ' ').trim();
+        });
+      }
+      lines = lines.filter(Boolean);
+      let numbered = 0;
+      const positional = [];
+      lines.forEach(line => {
+        const m = line.match(/^(\d{1,2})\s*[\.\)]\s*(.+)$/);
+        if (m) {
+          const n = parseInt(m[1]);
+          if (n >= 1 && n <= 40) { answersData[n] = m[2].trim(); numbered++; }
+        } else {
+          positional.push(line);
+        }
+      });
+      // Layout (b): no "N." prefixes — assign the plain values by position.
+      if (numbered === 0 && positional.length >= 20) {
+        positional.forEach((v, i) => { if (i < 40) answersData[i + 1] = v; });
+      }
     }
-    if (answerStart > 0) {
-      let answerSection = fullText.substring(answerStart)
-        .replace(/^\s*(?:Show\s+)?Answers?(?:\s+Key)?\s*:?\s*/i, '');
-      // The answer list may be either line-separated or all glued together
-      // (e.g. "1. tomatoes2. urban centres3. energy..."). Use a tolerant regex.
-      const answerRegex = /\b(\d{1,2})\s*[\.\)]\s*([^\d][^\d\n]*?)(?=\s*\d{1,2}\s*[\.\)]|$)/g;
-      let am;
-      while ((am = answerRegex.exec(answerSection)) !== null) {
-        const qNum = parseInt(am[1]);
-        const val = am[2].trim();
-        if (val.length > 40) break;
-        if (qNum >= 1 && qNum <= 40) answersData[qNum] = val;
+    // Fallback: older/rare pages without the box — anchor on the text marker.
+    if (Object.keys(answersData).length === 0) {
+      const fullText = contentEl.textContent || '';
+      let answerStart = fullText.search(/\b(?:Show\s+)?Answers?(?:\s+Key)?\s*:?\s*(?=1\s*[\.\)])/i);
+      if (answerStart < 0) {
+        answerStart = fullText.search(/\n\s*1\.\s*(?:True|False|Not\s*Given|Yes|No)\b/i);
+      }
+      if (answerStart > 0) {
+        let answerSection = fullText.substring(answerStart)
+          .replace(/^\s*(?:Show\s+)?Answers?(?:\s+Key)?\s*:?\s*/i, '');
+        const answerRegex = /\b(\d{1,2})\s*[\.\)]\s*([^\d][^\d\n]*?)(?=\s*\d{1,2}\s*[\.\)]|$)/g;
+        let am;
+        while ((am = answerRegex.exec(answerSection)) !== null) {
+          const qNum = parseInt(am[1]);
+          const val = am[2].trim();
+          if (val.length > 40) break;
+          if (qNum >= 1 && qNum <= 40) answersData[qNum] = val;
+        }
       }
     }
 
@@ -1781,6 +1814,7 @@
     return `
       <div class="check-answers-bar">
         <button class="btn-check-answers" id="btn-check-answers">Check Answers</button>
+        <button class="btn-show-answers" id="btn-show-answers">Show Answers</button>
         <button class="btn-reset-answers" id="btn-reset-answers">Reset</button>
         <span class="score-display" id="score-display"></span>
       </div>
@@ -1825,6 +1859,45 @@
     });
   }
 
+  // Normalise an answer for comparison: lowercase, strip surrounding quotes and
+  // trailing punctuation, collapse whitespace.
+  function normAnswer(s) {
+    return String(s || '')
+      .toLowerCase()
+      .replace(/[“”"’']/g, "'")
+      .replace(/[.,;:]+$/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // Expand an official answer into every acceptable form. Handles the two IELTS
+  // key conventions the source uses:
+  //   • "/"  → alternatives   ("water/ oceans"  → "water" OR "oceans")
+  //   • "(…)"→ optional words  ("slow (turning)" → "slow" OR "slow turning";
+  //                             "(tectonic) plates" → "plates" OR "tectonic plates")
+  function acceptableAnswers(official) {
+    const out = new Set();
+    const add = s => { const n = normAnswer(s); if (n) out.add(n); };
+    // Build with parentheticals removed, and with them kept (parens dropped).
+    const forms = [
+      official.replace(/\([^)]*\)/g, ' '),  // optional parts omitted
+      official.replace(/[()]/g, ' ')         // optional parts included
+    ];
+    forms.forEach(form => {
+      add(form);                              // whole form
+      form.split('/').forEach(add);           // slash alternatives
+    });
+    return [...out];
+  }
+
+  // Does the user's answer match the official one (strictly, but honouring the
+  // key's own "/" alternatives and "(…)" optional words)?
+  function answerMatches(user, official) {
+    const u = normAnswer(user);
+    if (!u) return false;
+    return acceptableAnswers(official).includes(u);
+  }
+
   // ---- Bind Answer Checking ----
   function bindAnswerChecking() {
     // Radio option selection styling
@@ -1843,8 +1916,56 @@
     });
 
     const checkBtn = document.getElementById('btn-check-answers');
+    const showBtn = document.getElementById('btn-show-answers');
     const resetBtn = document.getElementById('btn-reset-answers');
     const scoreDisplay = document.getElementById('score-display');
+
+    // Reveal / hide the official answers without grading the user's input.
+    function clearReveal() {
+      questionsContent.querySelectorAll('.answer-reveal').forEach(e => e.remove());
+      questionsContent.querySelectorAll('.answer-option.reveal-correct')
+        .forEach(o => o.classList.remove('reveal-correct'));
+    }
+
+    if (showBtn) {
+      showBtn.addEventListener('click', () => {
+        const showing = showBtn.classList.toggle('active');
+        clearReveal();
+        showBtn.textContent = showing ? 'Hide Answers' : 'Show Answers';
+        if (!showing) return;
+        questionsContent.querySelectorAll('.question-item[data-answer]').forEach(item => {
+          const official = (item.dataset.answer || '').trim();
+          if (!official) return;
+          // Highlight the correct radio option(s) in green. For "Choose TWO
+          // letters" groups the key is a set ("B, D"), so also match any single
+          // letter it contains.
+          const multiLetters = item.dataset.multi
+            ? official.toLowerCase().split(/[^a-z]+/).filter(Boolean) : [];
+          item.querySelectorAll('.answer-option').forEach(opt => {
+            const r = opt.querySelector('input[type="radio"]');
+            if (!r) return;
+            if (answerMatches(r.value, official) ||
+                multiLetters.includes(r.value.toLowerCase().trim())) {
+              opt.classList.add('reveal-correct');
+            }
+          });
+          // Append a pill showing the exact official answer. For matching
+          // dropdowns, add the option's text when the key stores only a letter.
+          let label = official;
+          const select = item.querySelector('.answer-select');
+          if (select) {
+            const first = official.split(/[,/]/)[0];
+            const opt = Array.from(select.options).find(o => normAnswer(o.value) === normAnswer(first));
+            const txt = opt && opt.getAttribute('data-text');
+            if (txt) label = `${official} — ${txt}`;
+          }
+          const pill = document.createElement('span');
+          pill.className = 'answer-reveal';
+          pill.textContent = `Answer: ${label}`;
+          (item.querySelector('.question-text') || item).appendChild(pill);
+        });
+      });
+    }
 
     if (checkBtn) {
       checkBtn.addEventListener('click', () => {
@@ -1852,7 +1973,8 @@
         const multiGroups = {}; // "21-22" -> [{item, expected, user}]
 
         questionsContent.querySelectorAll('.question-item[data-answer]').forEach(item => {
-          const expected = (item.dataset.answer || '').toLowerCase().trim();
+          const officialRaw = item.dataset.answer || '';
+          const expected = normAnswer(officialRaw);
           if (!expected) return;
           total++;
 
@@ -1871,12 +1993,12 @@
             return;
           }
 
-          let isCorrect = userAnswer === expected;
+          let isCorrect = answerMatches(userAnswer, officialRaw);
           // Letter dropdowns may carry the option's full text (word lists) —
           // accept the answer whether the key stores the letter or the word.
           if (!isCorrect && select && select.selectedIndex > 0) {
-            const optText = (select.options[select.selectedIndex].getAttribute('data-text') || '').toLowerCase().trim();
-            if (optText && optText === expected) isCorrect = true;
+            const optText = select.options[select.selectedIndex].getAttribute('data-text') || '';
+            if (answerMatches(optText, officialRaw)) isCorrect = true;
           }
           if (isCorrect) correct++;
 
@@ -1885,7 +2007,7 @@
             item.querySelectorAll('.answer-option').forEach(opt => {
               const r = opt.querySelector('input[type="radio"]');
               opt.classList.remove('correct-option', 'incorrect-option');
-              if (r && r.value.toLowerCase().trim() === expected) opt.classList.add('correct-option');
+              if (r && answerMatches(r.value, officialRaw)) opt.classList.add('correct-option');
               else if (r && r.checked && !isCorrect) opt.classList.add('incorrect-option');
             });
           } else if (input) {
@@ -1953,6 +2075,8 @@
           s.value = ''; s.style.borderColor = ''; s.style.background = ''; s.title = '';
         });
         questionsContent.querySelectorAll('.question-item').forEach(i => { i.title = ''; });
+        clearReveal();
+        if (showBtn) { showBtn.classList.remove('active'); showBtn.textContent = 'Show Answers'; }
         if (scoreDisplay) scoreDisplay.textContent = '';
       });
     }

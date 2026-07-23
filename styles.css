@@ -955,6 +955,28 @@ body {
   border-color: #e03131;
   color: #e03131;
 }
+/* Revealed (via Show Answers) — correct option, dashed to distinguish from a
+   graded result. */
+.answer-option.reveal-correct {
+  background: #ebfbee;
+  border: 2px dashed #2b8a3e;
+  color: #2b8a3e;
+  font-weight: 600;
+}
+/* Inline pill showing the exact official answer next to each question. */
+.answer-reveal {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 10px;
+  background: #ebfbee;
+  border: 1px solid #2b8a3e;
+  border-radius: 999px;
+  color: #1f6b30;
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
 
 /* Select dropdown */
 .answer-select {
@@ -1004,6 +1026,25 @@ body {
 .btn-check-answers:hover {
   transform: translateY(-1px);
   box-shadow: 0 4px 16px rgba(59,91,219,0.35);
+}
+.btn-show-answers {
+  padding: 8px 18px;
+  background: transparent;
+  color: #2b8a3e;
+  border: 1px solid #2b8a3e;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.btn-show-answers:hover {
+  background: #ebfbee;
+}
+.btn-show-answers.active {
+  background: #2b8a3e;
+  color: white;
 }
 .btn-reset-answers {
   padding: 8px 18px;
